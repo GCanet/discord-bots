@@ -1,0 +1,13 @@
+{
+  "name": "instance-bot",
+  "version": "1.0.0",
+  "description": "Ragnarok Guild Instance Signup Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
+  }
+}
