@@ -11,17 +11,20 @@ const client = new Client({
 
 const MARKET_CHANNEL_ID = process.env.MARKET_CHANNEL_ID;
 const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
-const ITEM_PAGE_BASE = 'https://revenantelegy.com/database/item'; // Updated as requested
+const DB_URL = 'https://revenantelegy.com/api/v1.0';
+const ITEM_PAGE_BASE = 'https://revenantelegy.com/market/item';
+const DB_ITEM_PAGE_BASE = 'https://revenantelegy.com/database/item';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
 const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = [
-  '`@ws <name or id> <option> <value> ...` — Who sells',
-  '`@ws id 1 200 24 5` — HP ≥ 200 and Crit ≥ 5',
-  '`@ph <name or id>` — Historical pricing',
+  '`@ws <name or id>` — who sells (cheapest listings + location)',
+  '`@ph <name or id>` — historical pricing',
+  '`@ii <name or id>` — item info',
+  '`@whodrops <name or id>` — which monsters drop this item',
 ].join('\n');
 
-// Option mappings and aliases
+// ─── Option maps (unchanged from previous version) ────────────────────────
 const OPTION_MAP = {
   1: 'HP', 2: 'SP', 3: 'STR', 4: 'AGI', 5: 'VIT', 6: 'INT', 7: 'DEX', 8: 'LUK',
   16: 'ASPD %', 17: 'ATK', 18: 'HIT', 19: 'MATK', 20: 'DEF', 21: 'MDEF',
@@ -70,10 +73,19 @@ const OPTION_ALIASES = {
   'allsize': 257, 'allrace': 258, 'small': 160, 'medium': 161, 'large': 162,
 };
 
-const nameCache = new Map();
-const nameToId = new Map();
+// ─── Caches ────────────────────────────────────────────────────────────────
+const nameCache = new Map();   // nameid -> item_name (from market listings)
+const nameToId = new Map();    // normalized name -> nameid
+// Full mob DB cache: loaded once on startup
+let mobCache = [];             // array of full mob objects
+let mobCacheLoaded = false;
+// Full item DB cache: array of { Id, Name, Slots, Type, ... }
+let itemDbCache = [];
+let itemDbLoaded = false;
+
 let alertedDealsThisCycle = new Set();
 
+// ─── Utilities ────────────────────────────────────────────────────────────
 function normalize(str) { return str.toLowerCase().trim(); }
 
 function median(prices) {
@@ -89,15 +101,29 @@ function formatPrice(p) {
   return `${p} z`;
 }
 
+function formatDropRate(rate) {
+  // rate is out of 10000 (10000 = 100%)
+  const pct = (rate / 100).toFixed(2);
+  return `${pct}%`;
+}
+
 function itemImageUrl(nameid) {
   return `https://static.divine-pride.net/images/items/item/${nameid}.png`;
+}
+
+function mobImageUrl(mobId) {
+  return `https://static.divine-pride.net/images/mobs/png/${mobId}.png`;
 }
 
 function itemPageUrl(nameid) {
   return `${ITEM_PAGE_BASE}/${nameid}`;
 }
 
-// New parser for structured filters: <option> <value> pairs
+function dbItemPageUrl(nameid) {
+  return `${DB_ITEM_PAGE_BASE}/${nameid}`;
+}
+
+// ─── Option filter parser (unchanged) ─────────────────────────────────────
 function parseWsQuery(fullQuery) {
   const parts = fullQuery.trim().split(/\s+/);
   const filters = [];
@@ -107,71 +133,40 @@ function parseWsQuery(fullQuery) {
     const part = parts[i];
     const num = parseInt(part);
 
-    // Try as option ID
     if (!isNaN(num) && OPTION_MAP[num]) {
       const value = parseInt(parts[i + 1]);
-      if (!isNaN(value)) {
-        filters.push({ id: num, value: value });
-        i++; // skip value
-        continue;
-      }
+      if (!isNaN(value)) { filters.push({ id: num, value }); i++; continue; }
     }
 
-    // Try alias
     const aliasId = OPTION_ALIASES[normalize(part)];
     if (aliasId !== undefined) {
       const value = parseInt(parts[i + 1]);
-      if (!isNaN(value)) {
-        filters.push({ id: aliasId, value: value });
-        i++;
-        continue;
-      }
+      if (!isNaN(value)) { filters.push({ id: aliasId, value }); i++; continue; }
     }
 
-    // Partial name match for options
     const lower = normalize(part);
     let found = false;
     for (const [idStr, label] of Object.entries(OPTION_MAP)) {
       if (normalize(label).includes(lower)) {
         const value = parseInt(parts[i + 1]);
-        if (!isNaN(value)) {
-          filters.push({ id: parseInt(idStr), value: value });
-          i++;
-          found = true;
-          break;
-        }
+        if (!isNaN(value)) { filters.push({ id: parseInt(idStr), value }); i++; found = true; break; }
       }
     }
     if (!found) itemParts.push(part);
   }
 
-  return {
-    itemQuery: itemParts.join(' '),
-    filters: filters
-  };
+  return { itemQuery: itemParts.join(' '), filters };
 }
 
 function hasAllFilters(listing, targetFilters) {
   if (!targetFilters || targetFilters.length === 0) return true;
   if (!Array.isArray(listing.options) || listing.options.length === 0) return false;
-
-  return targetFilters.every(filter => 
-    listing.options.some(opt => 
-      opt.id === filter.id && opt.value >= filter.value
-    )
-  );
+  return targetFilters.every(f => listing.options.some(o => o.id === f.id && o.value >= f.value));
 }
 
+// ─── Listing block formatter (unchanged) ──────────────────────────────────
 function buildListingBlock(listing, opts = {}) {
-  const {
-    nameid,
-    item_name,
-    medianPrice,
-    discount,
-    isWs = false,
-    amount,
-  } = opts;
-
+  const { nameid, item_name, medianPrice, discount, isWs = false } = opts;
   const lines = [];
 
   const refinePrefix = listing.refine ? `+${listing.refine} ` : '';
@@ -180,26 +175,20 @@ function buildListingBlock(listing, opts = {}) {
   lines.push(`${refinePrefix}[${displayName}](${url})`);
 
   if (Array.isArray(listing.cards) && listing.cards.length > 0) {
-    const cardList = listing.cards.map((c) => c.name).join(' | ');
-    lines.push(`🃏 ${cardList}`);
+    lines.push(`🃏 ${listing.cards.map(c => c.name).join(' | ')}`);
   }
 
   if (Array.isArray(listing.options) && listing.options.length > 0) {
     lines.push('🎲 Options:');
-    for (const o of listing.options) {
-      lines.push(`↳ ${o.label} ${o.value}`);
-    }
+    for (const o of listing.options) lines.push(`↳ ${o.label} ${o.value}`);
   }
 
   lines.push('');
 
-  if (!isWs && discount !== undefined) {
-    lines.push(`🏷️ Discount: **-${discount}%**`);
-  }
+  if (!isWs && discount !== undefined) lines.push(`🏷️ Discount: **-${discount}%**`);
 
-  const qty = amount || listing.amount || 1;
   if (isWs) {
-    lines.push(`💰 **${formatPrice(listing.price)}** x${qty}`);
+    lines.push(`💰 **${formatPrice(listing.price)}** x${listing.amount || 1}`);
   } else {
     lines.push(`💰 Sale Price: **${formatPrice(listing.price)}**`);
     lines.push(`📊 Average Price: **${formatPrice(medianPrice)}**`);
@@ -214,6 +203,7 @@ function buildListingBlock(listing, opts = {}) {
   return lines;
 }
 
+// ─── API helpers ───────────────────────────────────────────────────────────
 async function fetchPage(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -264,6 +254,44 @@ async function buildNameCache() {
   console.log(`[Market] Name cache: ${nameCache.size} items`);
 }
 
+// Load all mobs from DB (paginated)
+async function loadMobCache() {
+  if (mobCacheLoaded) return;
+  console.log('[Market] Loading mob DB...');
+  let page = 1;
+  while (true) {
+    let data;
+    try { data = await fetchPage(`${DB_URL}/mobs/?page=${page}&page_size=50`); }
+    catch (e) { console.error('Error loading mob DB:', e.message); break; }
+    const results = data.results || [];
+    if (!results.length) break;
+    mobCache.push(...results);
+    if (!data.next) break;
+    page++;
+  }
+  mobCacheLoaded = true;
+  console.log(`[Market] Mob DB loaded: ${mobCache.length} mobs`);
+}
+
+// Load all items from DB (paginated) — try /items/ endpoint
+async function loadItemDbCache() {
+  if (itemDbLoaded) return;
+  console.log('[Market] Loading item DB...');
+  let page = 1;
+  while (true) {
+    let data;
+    try { data = await fetchPage(`${DB_URL}/items/?page=${page}&page_size=50`); }
+    catch (e) { console.error('Error loading item DB:', e.message); break; }
+    const results = data.results || [];
+    if (!results.length) break;
+    itemDbCache.push(...results);
+    if (!data.next) break;
+    page++;
+  }
+  itemDbLoaded = true;
+  console.log(`[Market] Item DB loaded: ${itemDbCache.length} items`);
+}
+
 function resolveItem(query) {
   const asNum = parseInt(query);
   if (!isNaN(asNum)) return asNum;
@@ -276,11 +304,43 @@ function resolveItem(query) {
   return null;
 }
 
-// Deal scanner (unchanged)
+// Search item DB by name or id — returns array of matches
+function searchItemDb(query) {
+  const asNum = parseInt(query);
+  if (!isNaN(asNum)) {
+    const found = itemDbCache.filter(i => i.Id === asNum);
+    return found;
+  }
+  const lowerQ = normalize(query);
+  return itemDbCache.filter(i => normalize(i.Name || '').includes(lowerQ));
+}
+
+// Search mob drops by item id or name — returns array of { mob, drop }
+function findMobDrops(query) {
+  const asNum = parseInt(query);
+  const lowerQ = normalize(query);
+  const results = [];
+
+  for (const mob of mobCache) {
+    const allDrops = [...(mob.Drops || []), ...(mob.MvpDrops || []).map(d => ({ ...d, isMvp: true }))];
+    for (const drop of allDrops) {
+      const matchById = !isNaN(asNum) && drop.item_id === asNum;
+      const matchByName = normalize(drop.item_name || '').includes(lowerQ);
+      if (matchById || matchByName) {
+        results.push({ mob, drop });
+      }
+    }
+  }
+
+  // Sort by drop rate descending
+  results.sort((a, b) => b.drop.rate - a.drop.rate);
+  return results;
+}
+
+// ─── Deal scanner (unchanged) ─────────────────────────────────────────────
 async function scanForDeals(channel) {
   console.log('[Market] Scanning for deals...');
   alertedDealsThisCycle = new Set();
-
   const byItem = new Map();
 
   for await (const page of fetchAllListingsPages()) {
@@ -315,26 +375,19 @@ async function scanForDeals(channel) {
   }
 
   if (deals.length === 0) { console.log('[Market] No deals found.'); return; }
-
   deals.sort((a, b) => (a.minPrice / a.medianPrice) - (b.minPrice / b.medianPrice));
 
-  const dealBlocks = deals.map((deal) => {
-    const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
+  const dealBlocks = deals.map(({ nameid, item_name, minPrice, medianPrice, cheapest }) => {
     const discount = Math.round((1 - minPrice / medianPrice) * 100);
-    const lines = buildListingBlock(cheapest, { nameid, item_name, medianPrice, discount, isWs: false });
-    return lines.join('\n');
+    return buildListingBlock(cheapest, { nameid, item_name, medianPrice, discount, isWs: false }).join('\n');
   });
 
   const chunks = [];
   let current = '';
   for (const block of dealBlocks) {
     const candidate = current ? current + '\n\n' + block : block;
-    if (candidate.length > 3800) {
-      chunks.push(current);
-      current = block;
-    } else {
-      current = candidate;
-    }
+    if (candidate.length > 3800) { chunks.push(current); current = block; }
+    else current = candidate;
   }
   if (current) chunks.push(current);
 
@@ -344,61 +397,43 @@ async function scanForDeals(channel) {
       .setColor(0xf1c40f)
       .setDescription(chunks[i])
       .setTimestamp();
-
-    if (i === chunks.length - 1) {
-      embed.addFields({ name: '📋 Commands', value: LEGEND });
-    }
-
+    if (i === chunks.length - 1) embed.addFields({ name: '📋 Commands', value: LEGEND });
     await channel.send({ embeds: [embed] });
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 1500));
   }
 }
 
-// Updated @ws handler
+// ─── @ws ───────────────────────────────────────────────────────────────────
 async function handleWhoSells(message, fullQuery) {
   const { itemQuery, filters } = parseWsQuery(fullQuery);
   if (!itemQuery) return message.reply('❌ Please specify an item name or ID.');
 
   const nameid = resolveItem(itemQuery);
-  if (!nameid) return message.reply(`❌ Item \`${itemQuery}\` not found. Try the item ID number.`);
+  if (!nameid) return message.reply(`❌ Item \`${itemQuery}\` not found.`);
 
   let listings;
   try { listings = await fetchItemListings(nameid); }
-  catch (e) { return message.reply('❌ Failed to fetch market data. Try again later.'); }
+  catch (e) { return message.reply('❌ Failed to fetch market data.'); }
 
   const item_name = listings[0]?.item_name || nameCache.get(nameid) || `Item #${nameid}`;
+  if (listings.length === 0) return message.reply(`📦 No one is selling **${item_name}** right now.`);
 
-  if (listings.length === 0) {
-    return message.reply(`📦 No one is selling **${item_name}** right now.`);
-  }
-
-  let filtered = listings;
-  if (filters.length > 0) {
-    filtered = listings.filter(l => hasAllFilters(l, filters));
-    if (filtered.length === 0) {
-      const filterText = filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(', ');
-      return message.reply(`📦 No listings found for **${item_name}** with filters: **${filterText}**`);
-    }
+  let filtered = filters.length > 0 ? listings.filter(l => hasAllFilters(l, filters)) : listings;
+  if (filters.length > 0 && filtered.length === 0) {
+    const ft = filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(', ');
+    return message.reply(`📦 No listings found for **${item_name}** with filters: **${ft}**`);
   }
 
   const sorted = filtered.sort((a, b) => a.price - b.price).slice(0, 8);
-  const med = median(filtered.map((l) => l.price));
-
-  const listingBlocks = sorted.map((l) => {
-    const lines = buildListingBlock(l, { nameid, item_name, isWs: true });
-    return lines.join('\n');
-  });
-
-  const filterText = filters.length > 0 
-    ? ` [${filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(' + ')}]` 
-    : '';
+  const med = median(filtered.map(l => l.price));
+  const filterText = filters.length > 0 ? ` [${filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(' + ')}]` : '';
 
   const embed = new EmbedBuilder()
     .setTitle(`🛒 ${item_name} (${nameid})${filterText}`)
     .setURL(itemPageUrl(nameid))
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
-    .setDescription(listingBlocks.join('\n\n'))
+    .setDescription(sorted.map(l => buildListingBlock(l, { nameid, item_name, isWs: true }).join('\n')).join('\n\n'))
     .addFields(
       { name: '📊 Average Price', value: formatPrice(med), inline: true },
       { name: '📦 Total Listings', value: `${filtered.length}`, inline: true },
@@ -409,47 +444,41 @@ async function handleWhoSells(message, fullQuery) {
   return message.reply({ embeds: [embed] });
 }
 
-// @ph handler
+// ─── @ph ───────────────────────────────────────────────────────────────────
 async function handlePriceHistory(message, query) {
   const nameid = resolveItem(query);
-  if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
+  if (!nameid) return message.reply(`❌ Item \`${query}\` not found.`);
 
   let history;
   try {
     const res = await fetch(`${BASE_URL}/history/?nameid=${nameid}`);
     history = await res.json();
-  } catch (e) {
-    return message.reply('❌ Failed to fetch price history. Try again later.');
-  }
+  } catch (e) { return message.reply('❌ Failed to fetch price history.'); }
 
   const item_name = nameCache.get(nameid) || `Item #${nameid}`;
   const results = history.results || history;
 
   if (!Array.isArray(results) || results.length === 0) {
-    return message.reply(`📦 No price history found for **[${item_name}](${itemPageUrl(nameid)})**.`);
+    return message.reply(`📦 No price history for **[${item_name}](${itemPageUrl(nameid)})**.`);
   }
 
   const recent = results.slice(0, 10);
-  const prices = recent.map((r) => r.price);
+  const prices = recent.map(r => r.price);
   const med = median(prices);
-  const minP = Math.min(...prices);
-  const maxP = Math.max(...prices);
-
-  const lines = recent.map((r) => {
-    const date = r.listed_at ? `<t:${Math.floor(new Date(r.listed_at).getTime() / 1000)}:d>` : '?';
-    return `**${formatPrice(r.price)}** x${r.amount || 1} — ${date}`;
-  });
 
   const embed = new EmbedBuilder()
     .setTitle(`📈 Price History: ${item_name} (${nameid})`)
     .setURL(itemPageUrl(nameid))
     .setColor(0x9b59b6)
     .setThumbnail(itemImageUrl(nameid))
-    .setDescription(lines.join('\n'))
+    .setDescription(recent.map(r => {
+      const date = r.listed_at ? `<t:${Math.floor(new Date(r.listed_at).getTime() / 1000)}:d>` : '?';
+      return `**${formatPrice(r.price)}** x${r.amount || 1} — ${date}`;
+    }).join('\n'))
     .addFields(
       { name: '📊 Median', value: formatPrice(med), inline: true },
-      { name: '📉 Lowest', value: formatPrice(minP), inline: true },
-      { name: '📈 Highest', value: formatPrice(maxP), inline: true },
+      { name: '📉 Lowest', value: formatPrice(Math.min(...prices)), inline: true },
+      { name: '📈 Highest', value: formatPrice(Math.max(...prices)), inline: true },
       { name: '📋 Commands', value: LEGEND, inline: false }
     )
     .setFooter({ text: `Last ${recent.length} sales` });
@@ -457,10 +486,140 @@ async function handlePriceHistory(message, query) {
   return message.reply({ embeds: [embed] });
 }
 
-// Bot Ready
+// ─── @ii — Item Info ────────────────────────────────────────────────────────
+async function handleItemInfo(message, query) {
+  await loadItemDbCache();
+
+  const matches = searchItemDb(query);
+
+  if (matches.length === 0) {
+    // Fallback: try resolving from market name cache
+    const nameid = resolveItem(query);
+    if (!nameid) return message.reply(`❌ Item \`${query}\` not found in the database.`);
+    // Show minimal info from what we know
+    const name = nameCache.get(nameid) || `Item #${nameid}`;
+    const embed = new EmbedBuilder()
+      .setTitle(`📦 ${name}`)
+      .setURL(dbItemPageUrl(nameid))
+      .setColor(0x3498db)
+      .setThumbnail(itemImageUrl(nameid))
+      .addFields(
+        { name: 'Item ID', value: `${nameid}`, inline: true },
+        { name: '📋 Commands', value: LEGEND, inline: false }
+      );
+    return message.reply({ embeds: [embed] });
+  }
+
+  // If multiple matches, list them all
+  if (matches.length > 1) {
+    const lines = matches.slice(0, 20).map(item => {
+      const slots = item.Slots > 0 ? ` [${item.Slots}]` : '';
+      return `• **[${item.Name}${slots}](${dbItemPageUrl(item.Id)})** — ID: \`${item.Id}\` | ${item.Type || 'Item'}`;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🔍 Items matching "${query}" (${matches.length})`)
+      .setColor(0x3498db)
+      .setDescription(lines.join('\n'))
+      .addFields({ name: '📋 Commands', value: LEGEND, inline: false })
+      .setFooter({ text: matches.length > 20 ? `Showing 20 of ${matches.length}` : `${matches.length} results` });
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // Single match — show full info
+  const item = matches[0];
+  const fields = [];
+
+  if (item.Id) fields.push({ name: 'Item ID', value: `${item.Id}`, inline: true });
+  if (item.Type) fields.push({ name: 'Type', value: item.Type, inline: true });
+  if (item.Slots !== undefined) fields.push({ name: 'Slots', value: `${item.Slots}`, inline: true });
+  if (item.Weight) fields.push({ name: 'Weight', value: `${item.Weight / 10}`, inline: true });
+  if (item.Attack) fields.push({ name: 'ATK', value: `${item.Attack}`, inline: true });
+  if (item.MagicAttack) fields.push({ name: 'MATK', value: `${item.MagicAttack}`, inline: true });
+  if (item.Defense) fields.push({ name: 'DEF', value: `${item.Defense}`, inline: true });
+  if (item.Range) fields.push({ name: 'Range', value: `${item.Range}`, inline: true });
+  if (item.Jobs) fields.push({ name: 'Equippable by', value: Object.keys(item.Jobs).join(', ') || 'All', inline: false });
+  if (item.Locations) fields.push({ name: 'Equip slot', value: Object.keys(item.Locations).join(', '), inline: true });
+  if (item.Script) fields.push({ name: 'Script', value: `\`\`\`${item.Script.slice(0, 200)}\`\`\``, inline: false });
+
+  fields.push({ name: '📋 Commands', value: LEGEND, inline: false });
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📦 ${item.Name}${item.Slots > 0 ? ` [${item.Slots}]` : ''}`)
+    .setURL(dbItemPageUrl(item.Id))
+    .setColor(0x3498db)
+    .setThumbnail(itemImageUrl(item.Id))
+    .addFields(fields);
+
+  if (item.Description) {
+    embed.setDescription(item.Description.slice(0, 300));
+  }
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ─── @whodrops ─────────────────────────────────────────────────────────────
+async function handleWhoDrops(message, query) {
+  await loadMobCache();
+
+  const results = findMobDrops(query);
+
+  if (results.length === 0) {
+    return message.reply(`❌ No monsters found dropping \`${query}\`.`);
+  }
+
+  // Get item name from first result
+  const itemName = results[0].drop.item_name || query;
+  const itemId = results[0].drop.item_id;
+
+  // Separate MVP drops from normal drops
+  const mvpDrops = results.filter(r => r.drop.isMvp);
+  const normalDrops = results.filter(r => !r.drop.isMvp);
+
+  const formatDrop = ({ mob, drop }) => {
+    const mvpStar = drop.isMvp ? ' ⭐' : '';
+    const steal = drop.steal_protected ? ' 🔒' : '';
+    return `**${mob.Name}** (ID: ${mob.Id})${mvpStar}${steal} — **${formatDropRate(drop.rate)}**`;
+  };
+
+  const lines = [];
+  if (mvpDrops.length > 0) {
+    lines.push('**⭐ MVP Drops:**');
+    lines.push(...mvpDrops.slice(0, 10).map(formatDrop));
+    lines.push('');
+  }
+  if (normalDrops.length > 0) {
+    lines.push('**🗡️ Normal Drops:**');
+    lines.push(...normalDrops.slice(0, 20).map(formatDrop));
+  }
+
+  const totalShown = Math.min(results.length, 30);
+  const embed = new EmbedBuilder()
+    .setTitle(`🎯 Who Drops: ${itemName} (${itemId})`)
+    .setURL(dbItemPageUrl(itemId))
+    .setColor(0xe67e22)
+    .setThumbnail(itemImageUrl(itemId))
+    .setDescription(lines.join('\n'))
+    .addFields({ name: '📋 Commands', value: LEGEND, inline: false })
+    .setFooter({
+      text: [
+        `${results.length} monster(s) drop this item`,
+        results.length > 30 ? ` — showing top ${totalShown}` : '',
+        ' | 🔒 = steal protected | ⭐ = MVP drop',
+      ].join(''),
+    });
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ─── Bot Ready ────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`[Market Bot] Logged in as ${client.user.tag}`);
   await buildNameCache().catch(console.error);
+  // Load mob and item DBs in background — don't block startup
+  loadMobCache().catch(console.error);
+  loadItemDbCache().catch(console.error);
   const channel = await client.channels.fetch(MARKET_CHANNEL_ID).catch(() => null);
   if (!channel) { console.error('[Market Bot] Channel not found!'); return; }
   await scanForDeals(channel).catch(console.error);
@@ -468,7 +627,7 @@ client.once('ready', async () => {
   console.log(`[Market Bot] Scanning every ${SCAN_INTERVAL_MS / 60000} min.`);
 });
 
-// Message Handler
+// ─── Message Handler ──────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channelId !== MARKET_CHANNEL_ID) return;
@@ -479,6 +638,12 @@ client.on('messageCreate', async (message) => {
 
   const phMatch = content.match(/^[@!]ph\s+(.+)/i);
   if (phMatch) return handlePriceHistory(message, phMatch[1].trim());
+
+  const iiMatch = content.match(/^[@!]ii\s+(.+)/i);
+  if (iiMatch) return handleItemInfo(message, iiMatch[1].trim());
+
+  const wdMatch = content.match(/^[@!]whodrops\s+(.+)/i);
+  if (wdMatch) return handleWhoDrops(message, wdMatch[1].trim());
 });
 
 client.login(process.env.DISCORD_TOKEN);
