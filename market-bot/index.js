@@ -11,15 +11,13 @@ const client = new Client({
 
 const MARKET_CHANNEL_ID = process.env.MARKET_CHANNEL_ID;
 const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
-const ITEM_PAGE_BASE = 'https://revenantelegy.com/market/item';
+const ITEM_PAGE_BASE = 'https://revenantelegy.com/database/item'; // Updated as requested
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
 const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = [
-  '`@ws <name or id>` — who sells',
-  '`@ws <name or id> <option>` — filter by option',
-  '`@ws <name or id> <opt1> <opt2>` — multiple options (must have ALL)',
-  '`@ph <name or id>` — historical pricing',
+  '`@ws <name or id> <option> <value> ...` — filter with option + value (min value)',
+  '`example: @ws id 1 200 24 5` = HP ≥ 200 and Crit ≥ 5',
 ].join('\n');
 
 // Option mappings and aliases
@@ -66,7 +64,7 @@ const OPTION_ALIASES = {
   'hp': 1, 'sp': 2, 'str': 3, 'agi': 4, 'vit': 5, 'int': 6, 'dex': 7, 'luk': 8,
   'aspd': 16, 'atk': 17, 'hit': 18, 'matk': 19, 'def': 20, 'mdef': 21,
   'pdodge': 23, 'crit': 24, 'critdmg': 164, 'heal': 168,
-  'cast': 170, 'delay': 171, 'freeze': 255, 'sc': 256, 'stone': 256, 'stun': 256,
+  'cast': 170, 'delay': 171, 'freeze': 255, 'sc': 256, 'stone': 256,
   'spcons': 172, 'boss': 150, 'long': 167, 'allres': 193,
   'allsize': 257, 'allrace': 258, 'small': 160, 'medium': 161, 'large': 162,
 };
@@ -98,33 +96,49 @@ function itemPageUrl(nameid) {
   return `${ITEM_PAGE_BASE}/${nameid}`;
 }
 
-// Parse query with multiple options
+// New parser for structured filters: <option> <value> pairs
 function parseWsQuery(fullQuery) {
   const parts = fullQuery.trim().split(/\s+/);
-  const optionIds = [];
+  const filters = [];
   let itemParts = [];
 
-  for (const part of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
     const num = parseInt(part);
+
+    // Try as option ID
     if (!isNaN(num) && OPTION_MAP[num]) {
-      optionIds.push(num);
-      continue;
+      const value = parseInt(parts[i + 1]);
+      if (!isNaN(value)) {
+        filters.push({ id: num, value: value });
+        i++; // skip value
+        continue;
+      }
     }
 
+    // Try alias
     const aliasId = OPTION_ALIASES[normalize(part)];
     if (aliasId !== undefined) {
-      optionIds.push(aliasId);
-      continue;
+      const value = parseInt(parts[i + 1]);
+      if (!isNaN(value)) {
+        filters.push({ id: aliasId, value: value });
+        i++;
+        continue;
+      }
     }
 
     // Partial name match for options
     const lower = normalize(part);
     let found = false;
-    for (const [id, label] of Object.entries(OPTION_MAP)) {
+    for (const [idStr, label] of Object.entries(OPTION_MAP)) {
       if (normalize(label).includes(lower)) {
-        optionIds.push(parseInt(id));
-        found = true;
-        break;
+        const value = parseInt(parts[i + 1]);
+        if (!isNaN(value)) {
+          filters.push({ id: parseInt(idStr), value: value });
+          i++;
+          found = true;
+          break;
+        }
       }
     }
     if (!found) itemParts.push(part);
@@ -132,16 +146,18 @@ function parseWsQuery(fullQuery) {
 
   return {
     itemQuery: itemParts.join(' '),
-    optionIds: [...new Set(optionIds)]
+    filters: filters
   };
 }
 
-function hasAllOptions(listing, targetOptionIds) {
-  if (!targetOptionIds || targetOptionIds.length === 0) return true;
+function hasAllFilters(listing, targetFilters) {
+  if (!targetFilters || targetFilters.length === 0) return true;
   if (!Array.isArray(listing.options) || listing.options.length === 0) return false;
 
-  return targetOptionIds.every(id => 
-    listing.options.some(opt => opt.id === id)
+  return targetFilters.every(filter => 
+    listing.options.some(opt => 
+      opt.id === filter.id && opt.value >= filter.value
+    )
   );
 }
 
@@ -170,7 +186,7 @@ function buildListingBlock(listing, opts = {}) {
   if (Array.isArray(listing.options) && listing.options.length > 0) {
     lines.push('🎲 Options:');
     for (const o of listing.options) {
-      lines.push(`↳ ${o.label}`);
+      lines.push(`↳ ${o.label} ${o.value}`);
     }
   }
 
@@ -337,9 +353,9 @@ async function scanForDeals(channel) {
   }
 }
 
-// @ws handler with multiple options
+// Updated @ws handler
 async function handleWhoSells(message, fullQuery) {
-  const { itemQuery, optionIds } = parseWsQuery(fullQuery);
+  const { itemQuery, filters } = parseWsQuery(fullQuery);
   if (!itemQuery) return message.reply('❌ Please specify an item name or ID.');
 
   const nameid = resolveItem(itemQuery);
@@ -356,11 +372,11 @@ async function handleWhoSells(message, fullQuery) {
   }
 
   let filtered = listings;
-  if (optionIds.length > 0) {
-    filtered = listings.filter(l => hasAllOptions(l, optionIds));
+  if (filters.length > 0) {
+    filtered = listings.filter(l => hasAllFilters(l, filters));
     if (filtered.length === 0) {
-      const opts = optionIds.map(id => OPTION_MAP[id] || id).join(', ');
-      return message.reply(`📦 No listings found for **${item_name}** with all options: **${opts}**`);
+      const filterText = filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(', ');
+      return message.reply(`📦 No listings found for **${item_name}** with filters: **${filterText}**`);
     }
   }
 
@@ -372,10 +388,12 @@ async function handleWhoSells(message, fullQuery) {
     return lines.join('\n');
   });
 
-  const optText = optionIds.length > 0 ? ` [${optionIds.map(id => OPTION_MAP[id] || id).join(' + ')}]` : '';
+  const filterText = filters.length > 0 
+    ? ` [${filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(' + ')}]` 
+    : '';
 
   const embed = new EmbedBuilder()
-    .setTitle(`🛒 ${item_name} (${nameid})${optText}`)
+    .setTitle(`🛒 ${item_name} (${nameid})${filterText}`)
     .setURL(itemPageUrl(nameid))
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
