@@ -16,8 +16,9 @@ const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 6
 const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = [
-  '`@ws <name or id> <option> <value> ...` — filter with option + value (min value)',
+  '`@ws <name or id> <option> <value> ...` — who sells',
   '`example: @ws id 1 200 24 5` = HP ≥ 200 and Crit ≥ 5',
+  '`@ph <name or id> — historical pricing',
 ].join('\n');
 
 // Option mappings and aliases
