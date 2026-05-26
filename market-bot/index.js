@@ -12,7 +12,7 @@ const client = new Client({
 const MARKET_CHANNEL_ID = process.env.MARKET_CHANNEL_ID;
 const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
-const DEAL_THRESHOLD = 0.4; // 60% off
+const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = '`@ws <name or id>` — who sells (cheapest listings + location)';
 
@@ -209,19 +209,16 @@ async function handleWhoSells(message, query) {
 
   const lines = sorted.map((l) => {
     const navi = l.map ? `/navi ${l.map} ${l.x} ${l.y}` : 'Unknown';
-    return [
-      `💰 Sale Price: **${formatPrice(l.price)}** x${l.amount}`,
-      `📊 Average Price: **${formatPrice(med)}**`,
-      `🏪 ${l.shop_title || l.char_name || 'Unknown'} \`${navi}\``,
-    ].join('\n');
+    return `**${formatPrice(l.price)}** x${l.amount} — ${l.shop_title || l.char_name} \`${navi}\``;
   });
 
   const embed = new EmbedBuilder()
     .setTitle(`🛒 ${item_name} (${nameid})`)
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
-    .setDescription(lines.join('\n\n'))
+    .setDescription(lines.join('\n'))
     .addFields(
+      { name: '📊 Average Price', value: formatPrice(med), inline: true },
       { name: '📦 Total Listings', value: `${listings.length}`, inline: true },
       { name: '📋 Commands', value: LEGEND, inline: false }
     )
