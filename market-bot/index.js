@@ -20,11 +20,11 @@ const DEAL_THRESHOLD = 0.25; // 75% off
 const LEGEND = [
   '`@ws <name or id>` — who sells (cheapest listings + location)',
   '`@ph <name or id>` — historical pricing',
-  '`@ii <name or id>` — item info',
+  '`@ii <name or id>` — item info & search',
   '`@whodrops <name or id>` — which monsters drop this item',
 ].join('\n');
 
-// ─── Option maps (unchanged from previous version) ────────────────────────
+// ─── Option maps ──────────────────────────────────────────────────────────
 const OPTION_MAP = {
   1: 'HP', 2: 'SP', 3: 'STR', 4: 'AGI', 5: 'VIT', 6: 'INT', 7: 'DEX', 8: 'LUK',
   16: 'ASPD %', 17: 'ATK', 18: 'HIT', 19: 'MATK', 20: 'DEF', 21: 'MDEF',
@@ -74,14 +74,18 @@ const OPTION_ALIASES = {
 };
 
 // ─── Caches ────────────────────────────────────────────────────────────────
-const nameCache = new Map();   // nameid -> item_name (from market listings)
-const nameToId = new Map();    // normalized name -> nameid
-// Full mob DB cache: loaded once on startup
-let mobCache = [];             // array of full mob objects
+const nameCache = new Map();  // nameid -> item_name (from market)
+const nameToId = new Map();   // normalized name -> nameid
+
+// Full mob DB — all pages loaded on startup
+let mobCache = [];
 let mobCacheLoaded = false;
-// Full item DB cache: array of { Id, Name, Slots, Type, ... }
-let itemDbCache = [];
-let itemDbLoaded = false;
+let mobCacheLoading = false;
+
+// Item index built from mob drops — Map<item_id, { name, slots, fromMobs }>
+// We don't have a real item DB endpoint so we build from mob drops
+let itemIndex = new Map();   // item_id (number) -> { id, name }
+let itemNameIndex = new Map(); // normalized name -> [item_id, ...]
 
 let alertedDealsThisCycle = new Set();
 
@@ -102,17 +106,11 @@ function formatPrice(p) {
 }
 
 function formatDropRate(rate) {
-  // rate is out of 10000 (10000 = 100%)
-  const pct = (rate / 100).toFixed(2);
-  return `${pct}%`;
+  return `${(rate / 100).toFixed(2)}%`;
 }
 
 function itemImageUrl(nameid) {
   return `https://static.divine-pride.net/images/items/item/${nameid}.png`;
-}
-
-function mobImageUrl(mobId) {
-  return `https://static.divine-pride.net/images/mobs/png/${mobId}.png`;
 }
 
 function itemPageUrl(nameid) {
@@ -123,7 +121,7 @@ function dbItemPageUrl(nameid) {
   return `${DB_ITEM_PAGE_BASE}/${nameid}`;
 }
 
-// ─── Option filter parser (unchanged) ─────────────────────────────────────
+// ─── Option filter parser ──────────────────────────────────────────────────
 function parseWsQuery(fullQuery) {
   const parts = fullQuery.trim().split(/\s+/);
   const filters = [];
@@ -164,7 +162,7 @@ function hasAllFilters(listing, targetFilters) {
   return targetFilters.every(f => listing.options.some(o => o.id === f.id && o.value >= f.value));
 }
 
-// ─── Listing block formatter (unchanged) ──────────────────────────────────
+// ─── Listing block formatter ───────────────────────────────────────────────
 function buildListingBlock(listing, opts = {}) {
   const { nameid, item_name, medianPrice, discount, isWs = false } = opts;
   const lines = [];
@@ -174,9 +172,8 @@ function buildListingBlock(listing, opts = {}) {
   const url = itemPageUrl(nameid || listing.nameid);
   lines.push(`${refinePrefix}[${displayName}](${url})`);
 
-  if (Array.isArray(listing.cards) && listing.cards.length > 0) {
+  if (Array.isArray(listing.cards) && listing.cards.length > 0)
     lines.push(`🃏 ${listing.cards.map(c => c.name).join(' | ')}`);
-  }
 
   if (Array.isArray(listing.options) && listing.options.length > 0) {
     lines.push('🎲 Options:');
@@ -218,7 +215,8 @@ async function fetchItemListings(nameid) {
     const results = data.results || data;
     if (!Array.isArray(results) || results.length === 0) break;
     listings.push(...results);
-    if (!data.next) break;
+    // Use pages count for pagination (no 'next' field in this API)
+    if (!data.pages || page >= data.pages) break;
     page++;
     if (page > 20) break;
   }
@@ -234,7 +232,7 @@ async function* fetchAllListingsPages() {
     const results = data.results || data;
     if (!Array.isArray(results) || results.length === 0) break;
     yield results;
-    if (!data.next) break;
+    if (!data.pages || page >= data.pages) break;
     page++;
   }
 }
@@ -254,90 +252,132 @@ async function buildNameCache() {
   console.log(`[Market] Name cache: ${nameCache.size} items`);
 }
 
-// Load all mobs from DB (paginated)
+// Load ALL mob pages — uses pages count, not next field
 async function loadMobCache() {
-  if (mobCacheLoaded) return;
-  console.log('[Market] Loading mob DB...');
-  let page = 1;
-  while (true) {
-    let data;
-    try { data = await fetchPage(`${DB_URL}/mobs/?page=${page}&page_size=50`); }
-    catch (e) { console.error('Error loading mob DB:', e.message); break; }
-    const results = data.results || [];
-    if (!results.length) break;
-    mobCache.push(...results);
-    if (!data.next) break;
-    page++;
-  }
-  mobCacheLoaded = true;
-  console.log(`[Market] Mob DB loaded: ${mobCache.length} mobs`);
-}
+  if (mobCacheLoaded || mobCacheLoading) return;
+  mobCacheLoading = true;
+  console.log('[Market] Loading full mob DB...');
 
-// Load all items from DB (paginated) — try /items/ endpoint
-async function loadItemDbCache() {
-  if (itemDbLoaded) return;
-  console.log('[Market] Loading item DB...');
-  let page = 1;
-  while (true) {
-    let data;
-    try { data = await fetchPage(`${DB_URL}/items/?page=${page}&page_size=50`); }
-    catch (e) { console.error('Error loading item DB:', e.message); break; }
-    const results = data.results || [];
-    if (!results.length) break;
-    itemDbCache.push(...results);
-    if (!data.next) break;
-    page++;
+  try {
+    // Get page count first
+    const first = await fetchPage(`${DB_URL}/mobs/?page=1&page_size=50`);
+    const totalPages = first.pages || 1;
+    console.log(`[Market] Mob DB: ${first.total} mobs across ${totalPages} pages`);
+
+    mobCache.push(...(first.results || []));
+
+    // Fetch remaining pages in parallel batches of 5
+    for (let p = 2; p <= totalPages; p += 5) {
+      const batch = [];
+      for (let b = p; b < p + 5 && b <= totalPages; b++) {
+        batch.push(fetchPage(`${DB_URL}/mobs/?page=${b}&page_size=50`));
+      }
+      const results = await Promise.all(batch);
+      for (const r of results) mobCache.push(...(r.results || []));
+    }
+
+    // Build item index from all drop tables
+    for (const mob of mobCache) {
+      const allDrops = [
+        ...(mob.Drops || []),
+        ...(mob.MvpDrops || []),
+      ];
+      for (const drop of allDrops) {
+        if (!drop.item_id || !drop.item_name) continue;
+        if (!itemIndex.has(drop.item_id)) {
+          itemIndex.set(drop.item_id, { id: drop.item_id, name: drop.item_name, slots: drop.item_slots || 0 });
+          const key = normalize(drop.item_name);
+          if (!itemNameIndex.has(key)) itemNameIndex.set(key, []);
+          itemNameIndex.get(key).push(drop.item_id);
+        }
+      }
+    }
+
+    mobCacheLoaded = true;
+    console.log(`[Market] Mob DB loaded: ${mobCache.length} mobs, ${itemIndex.size} unique items indexed`);
+  } catch (e) {
+    console.error('[Market] Failed to load mob DB:', e.message);
+    mobCacheLoading = false;
   }
-  itemDbLoaded = true;
-  console.log(`[Market] Item DB loaded: ${itemDbCache.length} items`);
 }
 
 function resolveItem(query) {
   const asNum = parseInt(query);
   if (!isNaN(asNum)) return asNum;
+  // market name cache
   const exactId = nameToId.get(normalize(query));
   if (exactId) return exactId;
+  // item index from mob drops
+  const fromIndex = itemNameIndex.get(normalize(query));
+  if (fromIndex && fromIndex.length > 0) return fromIndex[0];
+  // partial match in market cache
   const lowerQ = normalize(query);
   for (const [name, id] of nameToId.entries()) {
     if (name.includes(lowerQ)) return id;
   }
+  // partial match in item index
+  for (const [name, ids] of itemNameIndex.entries()) {
+    if (name.includes(lowerQ)) return ids[0];
+  }
   return null;
 }
 
-// Search item DB by name or id — returns array of matches
-function searchItemDb(query) {
+// Search items by name — returns array of { id, name, slots }
+function searchItems(query) {
   const asNum = parseInt(query);
   if (!isNaN(asNum)) {
-    const found = itemDbCache.filter(i => i.Id === asNum);
-    return found;
+    const item = itemIndex.get(asNum);
+    return item ? [item] : [];
   }
+
   const lowerQ = normalize(query);
-  return itemDbCache.filter(i => normalize(i.Name || '').includes(lowerQ));
+  const seen = new Set();
+  const results = [];
+
+  // Exact matches first
+  for (const [name, ids] of itemNameIndex.entries()) {
+    if (name === lowerQ) {
+      for (const id of ids) {
+        if (!seen.has(id)) { seen.add(id); results.push(itemIndex.get(id)); }
+      }
+    }
+  }
+  // Then partial matches
+  for (const [name, ids] of itemNameIndex.entries()) {
+    if (name !== lowerQ && name.includes(lowerQ)) {
+      for (const id of ids) {
+        if (!seen.has(id)) { seen.add(id); results.push(itemIndex.get(id)); }
+      }
+    }
+  }
+
+  return results.filter(Boolean);
 }
 
-// Search mob drops by item id or name — returns array of { mob, drop }
+// Find all mobs dropping an item — returns array of { mob, drop, isMvp }
 function findMobDrops(query) {
   const asNum = parseInt(query);
   const lowerQ = normalize(query);
   const results = [];
 
   for (const mob of mobCache) {
-    const allDrops = [...(mob.Drops || []), ...(mob.MvpDrops || []).map(d => ({ ...d, isMvp: true }))];
-    for (const drop of allDrops) {
+    for (const drop of (mob.Drops || [])) {
       const matchById = !isNaN(asNum) && drop.item_id === asNum;
-      const matchByName = normalize(drop.item_name || '').includes(lowerQ);
-      if (matchById || matchByName) {
-        results.push({ mob, drop });
-      }
+      const matchByName = isNaN(asNum) && normalize(drop.item_name || '').includes(lowerQ);
+      if (matchById || matchByName) results.push({ mob, drop, isMvp: false });
+    }
+    for (const drop of (mob.MvpDrops || [])) {
+      const matchById = !isNaN(asNum) && drop.item_id === asNum;
+      const matchByName = isNaN(asNum) && normalize(drop.item_name || '').includes(lowerQ);
+      if (matchById || matchByName) results.push({ mob, drop, isMvp: true });
     }
   }
 
-  // Sort by drop rate descending
   results.sort((a, b) => b.drop.rate - a.drop.rate);
   return results;
 }
 
-// ─── Deal scanner (unchanged) ─────────────────────────────────────────────
+// ─── Deal scanner ─────────────────────────────────────────────────────────
 async function scanForDeals(channel) {
   console.log('[Market] Scanning for deals...');
   alertedDealsThisCycle = new Set();
@@ -415,13 +455,13 @@ async function handleWhoSells(message, fullQuery) {
   try { listings = await fetchItemListings(nameid); }
   catch (e) { return message.reply('❌ Failed to fetch market data.'); }
 
-  const item_name = listings[0]?.item_name || nameCache.get(nameid) || `Item #${nameid}`;
+  const item_name = listings[0]?.item_name || nameCache.get(nameid) || itemIndex.get(nameid)?.name || `Item #${nameid}`;
   if (listings.length === 0) return message.reply(`📦 No one is selling **${item_name}** right now.`);
 
   let filtered = filters.length > 0 ? listings.filter(l => hasAllFilters(l, filters)) : listings;
   if (filters.length > 0 && filtered.length === 0) {
     const ft = filters.map(f => `${OPTION_MAP[f.id] || f.id} ≥ ${f.value}`).join(', ');
-    return message.reply(`📦 No listings found for **${item_name}** with filters: **${ft}**`);
+    return message.reply(`📦 No listings for **${item_name}** with filters: **${ft}**`);
   }
 
   const sorted = filtered.sort((a, b) => a.price - b.price).slice(0, 8);
@@ -455,12 +495,11 @@ async function handlePriceHistory(message, query) {
     history = await res.json();
   } catch (e) { return message.reply('❌ Failed to fetch price history.'); }
 
-  const item_name = nameCache.get(nameid) || `Item #${nameid}`;
+  const item_name = nameCache.get(nameid) || itemIndex.get(nameid)?.name || `Item #${nameid}`;
   const results = history.results || history;
 
-  if (!Array.isArray(results) || results.length === 0) {
+  if (!Array.isArray(results) || results.length === 0)
     return message.reply(`📦 No price history for **[${item_name}](${itemPageUrl(nameid)})**.`);
-  }
 
   const recent = results.slice(0, 10);
   const prices = recent.map(r => r.price);
@@ -486,129 +525,112 @@ async function handlePriceHistory(message, query) {
   return message.reply({ embeds: [embed] });
 }
 
-// ─── @ii — Item Info ────────────────────────────────────────────────────────
+// ─── @ii — Item Info ───────────────────────────────────────────────────────
 async function handleItemInfo(message, query) {
-  await loadItemDbCache();
+  if (!mobCacheLoaded) {
+    await message.reply('⏳ Item database is still loading, please try again in a few seconds.');
+    return;
+  }
 
-  const matches = searchItemDb(query);
+  const matches = searchItems(query);
 
   if (matches.length === 0) {
-    // Fallback: try resolving from market name cache
+    // Try market name cache as fallback
     const nameid = resolveItem(query);
-    if (!nameid) return message.reply(`❌ Item \`${query}\` not found in the database.`);
-    // Show minimal info from what we know
+    if (!nameid) return message.reply(`❌ Item \`${query}\` not found.`);
     const name = nameCache.get(nameid) || `Item #${nameid}`;
-    const embed = new EmbedBuilder()
-      .setTitle(`📦 ${name}`)
-      .setURL(dbItemPageUrl(nameid))
-      .setColor(0x3498db)
-      .setThumbnail(itemImageUrl(nameid))
-      .addFields(
-        { name: 'Item ID', value: `${nameid}`, inline: true },
-        { name: '📋 Commands', value: LEGEND, inline: false }
-      );
-    return message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle(`📦 ${name} (${nameid})`)
+        .setURL(dbItemPageUrl(nameid))
+        .setColor(0x3498db)
+        .setThumbnail(itemImageUrl(nameid))
+        .addFields(
+          { name: 'Item ID', value: `${nameid}`, inline: true },
+          { name: '📋 Commands', value: LEGEND, inline: false }
+        )
+    ]});
   }
 
-  // If multiple matches, list them all
+  // Multiple matches — show full list
   if (matches.length > 1) {
-    const lines = matches.slice(0, 20).map(item => {
-      const slots = item.Slots > 0 ? ` [${item.Slots}]` : '';
-      return `• **[${item.Name}${slots}](${dbItemPageUrl(item.Id)})** — ID: \`${item.Id}\` | ${item.Type || 'Item'}`;
+    const lines = matches.slice(0, 25).map(item => {
+      const slots = item.slots > 0 ? ` [${item.slots}]` : '';
+      return `• **[${item.name}${slots}](${dbItemPageUrl(item.id)})** — ID: \`${item.id}\``;
     });
 
-    const embed = new EmbedBuilder()
-      .setTitle(`🔍 Items matching "${query}" (${matches.length})`)
-      .setColor(0x3498db)
-      .setDescription(lines.join('\n'))
-      .addFields({ name: '📋 Commands', value: LEGEND, inline: false })
-      .setFooter({ text: matches.length > 20 ? `Showing 20 of ${matches.length}` : `${matches.length} results` });
-
-    return message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle(`🔍 Items matching "${query}" (${matches.length})`)
+        .setColor(0x3498db)
+        .setDescription(lines.join('\n'))
+        .addFields({ name: '📋 Commands', value: LEGEND })
+        .setFooter({ text: matches.length > 25 ? `Showing 25 of ${matches.length} — use item ID for exact match` : `${matches.length} results` })
+    ]});
   }
 
-  // Single match — show full info
+  // Single match
   const item = matches[0];
-  const fields = [];
+  const slots = item.slots > 0 ? ` [${item.slots}]` : '';
 
-  if (item.Id) fields.push({ name: 'Item ID', value: `${item.Id}`, inline: true });
-  if (item.Type) fields.push({ name: 'Type', value: item.Type, inline: true });
-  if (item.Slots !== undefined) fields.push({ name: 'Slots', value: `${item.Slots}`, inline: true });
-  if (item.Weight) fields.push({ name: 'Weight', value: `${item.Weight / 10}`, inline: true });
-  if (item.Attack) fields.push({ name: 'ATK', value: `${item.Attack}`, inline: true });
-  if (item.MagicAttack) fields.push({ name: 'MATK', value: `${item.MagicAttack}`, inline: true });
-  if (item.Defense) fields.push({ name: 'DEF', value: `${item.Defense}`, inline: true });
-  if (item.Range) fields.push({ name: 'Range', value: `${item.Range}`, inline: true });
-  if (item.Jobs) fields.push({ name: 'Equippable by', value: Object.keys(item.Jobs).join(', ') || 'All', inline: false });
-  if (item.Locations) fields.push({ name: 'Equip slot', value: Object.keys(item.Locations).join(', '), inline: true });
-  if (item.Script) fields.push({ name: 'Script', value: `\`\`\`${item.Script.slice(0, 200)}\`\`\``, inline: false });
-
-  fields.push({ name: '📋 Commands', value: LEGEND, inline: false });
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📦 ${item.Name}${item.Slots > 0 ? ` [${item.Slots}]` : ''}`)
-    .setURL(dbItemPageUrl(item.Id))
-    .setColor(0x3498db)
-    .setThumbnail(itemImageUrl(item.Id))
-    .addFields(fields);
-
-  if (item.Description) {
-    embed.setDescription(item.Description.slice(0, 300));
-  }
-
-  return message.reply({ embeds: [embed] });
+  return message.reply({ embeds: [
+    new EmbedBuilder()
+      .setTitle(`📦 ${item.name}${slots}`)
+      .setURL(dbItemPageUrl(item.id))
+      .setColor(0x3498db)
+      .setThumbnail(itemImageUrl(item.id))
+      .addFields(
+        { name: 'Item ID', value: `${item.id}`, inline: true },
+        { name: 'Slots', value: `${item.slots}`, inline: true },
+        { name: '📋 Commands', value: LEGEND, inline: false }
+      )
+  ]});
 }
 
 // ─── @whodrops ─────────────────────────────────────────────────────────────
 async function handleWhoDrops(message, query) {
-  await loadMobCache();
+  if (!mobCacheLoaded) {
+    await message.reply('⏳ Monster database is still loading, please try again in a few seconds.');
+    return;
+  }
 
   const results = findMobDrops(query);
 
-  if (results.length === 0) {
+  if (results.length === 0)
     return message.reply(`❌ No monsters found dropping \`${query}\`.`);
-  }
 
-  // Get item name from first result
   const itemName = results[0].drop.item_name || query;
   const itemId = results[0].drop.item_id;
 
-  // Separate MVP drops from normal drops
-  const mvpDrops = results.filter(r => r.drop.isMvp);
-  const normalDrops = results.filter(r => !r.drop.isMvp);
+  const mvpDrops = results.filter(r => r.isMvp);
+  const normalDrops = results.filter(r => !r.isMvp);
 
-  const formatDrop = ({ mob, drop }) => {
-    const mvpStar = drop.isMvp ? ' ⭐' : '';
-    const steal = drop.steal_protected ? ' 🔒' : '';
-    return `**${mob.Name}** (ID: ${mob.Id})${mvpStar}${steal} — **${formatDropRate(drop.rate)}**`;
-  };
+  const formatEntry = ({ mob, drop }) =>
+    `**${mob.Name}** (ID: ${mob.Id}) — **${formatDropRate(drop.rate)}**${drop.steal_protected ? ' 🔒' : ''}`;
 
   const lines = [];
   if (mvpDrops.length > 0) {
     lines.push('**⭐ MVP Drops:**');
-    lines.push(...mvpDrops.slice(0, 10).map(formatDrop));
+    lines.push(...mvpDrops.map(formatEntry));
     lines.push('');
   }
   if (normalDrops.length > 0) {
-    lines.push('**🗡️ Normal Drops:**');
-    lines.push(...normalDrops.slice(0, 20).map(formatDrop));
+    lines.push(`**🗡️ Normal Drops (${normalDrops.length}):**`);
+    lines.push(...normalDrops.map(formatEntry));
   }
 
-  const totalShown = Math.min(results.length, 30);
+  // chunk if too long
+  const description = lines.join('\n');
+  const truncated = description.length > 3900;
+
   const embed = new EmbedBuilder()
     .setTitle(`🎯 Who Drops: ${itemName} (${itemId})`)
     .setURL(dbItemPageUrl(itemId))
     .setColor(0xe67e22)
     .setThumbnail(itemImageUrl(itemId))
-    .setDescription(lines.join('\n'))
-    .addFields({ name: '📋 Commands', value: LEGEND, inline: false })
-    .setFooter({
-      text: [
-        `${results.length} monster(s) drop this item`,
-        results.length > 30 ? ` — showing top ${totalShown}` : '',
-        ' | 🔒 = steal protected | ⭐ = MVP drop',
-      ].join(''),
-    });
+    .setDescription(truncated ? description.slice(0, 3900) + '\n...' : description)
+    .addFields({ name: '📋 Commands', value: LEGEND })
+    .setFooter({ text: `${results.length} monster(s) | 🔒 steal protected | ⭐ MVP drop` });
 
   return message.reply({ embeds: [embed] });
 }
@@ -617,9 +639,7 @@ async function handleWhoDrops(message, query) {
 client.once('ready', async () => {
   console.log(`[Market Bot] Logged in as ${client.user.tag}`);
   await buildNameCache().catch(console.error);
-  // Load mob and item DBs in background — don't block startup
-  loadMobCache().catch(console.error);
-  loadItemDbCache().catch(console.error);
+  loadMobCache().catch(console.error); // background, non-blocking
   const channel = await client.channels.fetch(MARKET_CHANNEL_ID).catch(() => null);
   if (!channel) { console.error('[Market Bot] Channel not found!'); return; }
   await scanForDeals(channel).catch(console.error);
