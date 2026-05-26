@@ -16,143 +16,59 @@ const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 6
 const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = [
-  '`@ws <name or id>` — who sells (cheapest listings + location)',
-  '`@ws <name or id> <option>` — filter by option (id, name, or alias)',
+  '`@ws <name or id>` — who sells',
+  '`@ws <name or id> <option>` — filter by option',
+  '`@ws <name or id> <opt1> <opt2>` — multiple options (must have ALL)',
   '`@ph <name or id>` — historical pricing',
 ].join('\n');
 
 // Option mappings and aliases
 const OPTION_MAP = {
-  // ID to label
-  1: 'HP',
-  2: 'SP',
-  3: 'STR',
-  4: 'AGI',
-  5: 'VIT',
-  6: 'INT',
-  7: 'DEX',
-  8: 'LUK',
-  16: 'ASPD %',
-  17: 'ATK',
-  18: 'HIT',
-  19: 'MATK',
-  20: 'DEF',
-  21: 'MDEF',
-  23: 'Perfect Dodge',
-  24: 'Crit Chance',
-  164: '% Crit Damage',
-  168: 'Healing Effectiveness',
-  170: 'Cast Time Reduction',
-  171: 'After Cast Delay',
-  255: 'Freeze Resist',
-  256: 'Stone Curse Resist',
-  172: 'SP Consumption',
-  150: '% Resist Boss',
-  167: '% Resist Long Range',
-  193: '% Resist All Elements',
-  257: '% Resist All Sizes',
-  258: '% Resist All Races',
-  160: '% Resist Small',
-  161: '% Resist Medium',
-  162: '% Resist Large',
-  25: '% Resist Neutral Element',
-  26: '% Resist Water Element',
-  27: '% Resist Earth Element',
-  28: '% Resist Fire Element',
-  29: '% Resist Wind Element',
-  30: '% Resist Poison Element',
-  31: '% Resist Holy Element',
-  32: '% Resist Shadow Element',
-  33: '% Resist Ghost Element',
-  87: '% Resist Formless Race',
-  88: '% Resist Undead Race',
-  89: '% Resist Brute Race',
-  90: '% Resist Plant Race',
-  91: '% Resist Insect Race',
-  92: '% Resist Fish Race',
-  93: '% Resist Demon Race',
-  94: '% Resist Demi-Human Race',
-  95: '% Resist Angel Race',
+  1: 'HP', 2: 'SP', 3: 'STR', 4: 'AGI', 5: 'VIT', 6: 'INT', 7: 'DEX', 8: 'LUK',
+  16: 'ASPD %', 17: 'ATK', 18: 'HIT', 19: 'MATK', 20: 'DEF', 21: 'MDEF',
+  23: 'Perfect Dodge', 24: 'Crit Chance', 164: '% Crit Damage',
+  168: 'Healing Effectiveness', 170: 'Cast Time Reduction', 171: 'After Cast Delay',
+  255: 'Freeze Resist', 256: 'Stone Curse Resist', 172: 'SP Consumption',
+  150: '% Resist Boss', 167: '% Resist Long Range', 193: '% Resist All Elements',
+  257: '% Resist All Sizes', 258: '% Resist All Races',
+  160: '% Resist Small', 161: '% Resist Medium', 162: '% Resist Large',
+  25: '% Resist Neutral Element', 26: '% Resist Water Element', 27: '% Resist Earth Element',
+  28: '% Resist Fire Element', 29: '% Resist Wind Element', 30: '% Resist Poison Element',
+  31: '% Resist Holy Element', 32: '% Resist Shadow Element', 33: '% Resist Ghost Element',
+  87: '% Resist Formless Race', 88: '% Resist Undead Race', 89: '% Resist Brute Race',
+  90: '% Resist Plant Race', 91: '% Resist Insect Race', 92: '% Resist Fish Race',
+  93: '% Resist Demon Race', 94: '% Resist Demi-Human Race', 95: '% Resist Angel Race',
   96: '% Resist Dragon Race',
-  37: '% Physical Damage to Neutral',
-  39: '% Physical Damage to Water',
-  41: '% Physical Damage to Earth',
-  43: '% Physical Damage to Fire',
-  45: '% Physical Damage to Wind',
-  47: '% Physical Damage to Poison',
-  49: '% Physical Damage to Holy',
-  51: '% Physical Damage to Shadow',
-  53: '% Physical Damage to Ghost',
-  55: '% Physical Damage to Undead (element)',
-  57: '% Magical Damage to Neutral',
-  59: '% Magical Damage to Water',
-  61: '% Magical Damage to Earth',
-  63: '% Magical Damage to Fire',
-  65: '% Magical Damage to Wind',
-  67: '% Magical Damage to Poison',
-  69: '% Magical Damage to Holy',
-  71: '% Magical Damage to Shadow',
-  73: '% Magical Damage to Ghost',
-  75: '% Magical Damage to Undead (element)',
-  97: '% Physical Damage to Formless',
-  98: '% Physical Damage to Undead (race)',
-  99: '% Physical Damage to Brute',
-  100: '% Physical Damage to Plant',
-  101: '% Physical Damage to Insect',
-  102: '% Physical Damage to Fish',
-  103: '% Physical Damage to Demon',
-  104: '% Physical Damage to Demi-Human',
-  105: '% Physical Damage to Angel',
-  106: '% Physical Damage to Dragon',
-  107: '% Magical Damage to Formless',
-  108: '% Magical Damage to Undead (race)',
-  109: '% Magical Damage to Brute',
-  110: '% Magical Damage to Plant',
-  111: '% Magical Damage to Insect',
-  112: '% Magical Damage to Fish',
-  113: '% Magical Damage to Demon',
-  114: '% Magical Damage to Demi-Human',
-  115: '% Magical Damage to Angel',
-  116: '% Magical Damage to Dragon',
-  279: '% Incoming Healing',
-  280: 'Movement Speed',
+  37: '% Physical Damage to Neutral', 39: '% Physical Damage to Water',
+  41: '% Physical Damage to Earth', 43: '% Physical Damage to Fire',
+  45: '% Physical Damage to Wind', 47: '% Physical Damage to Poison',
+  49: '% Physical Damage to Holy', 51: '% Physical Damage to Shadow',
+  53: '% Physical Damage to Ghost', 55: '% Physical Damage to Undead (element)',
+  57: '% Magical Damage to Neutral', 59: '% Magical Damage to Water',
+  61: '% Magical Damage to Earth', 63: '% Magical Damage to Fire',
+  65: '% Magical Damage to Wind', 67: '% Magical Damage to Poison',
+  69: '% Magical Damage to Holy', 71: '% Magical Damage to Shadow',
+  73: '% Magical Damage to Ghost', 75: '% Magical Damage to Undead (element)',
+  97: '% Physical Damage to Formless', 98: '% Physical Damage to Undead (race)',
+  99: '% Physical Damage to Brute', 100: '% Physical Damage to Plant',
+  101: '% Physical Damage to Insect', 102: '% Physical Damage to Fish',
+  103: '% Physical Damage to Demon', 104: '% Physical Damage to Demi-Human',
+  105: '% Physical Damage to Angel', 106: '% Physical Damage to Dragon',
+  107: '% Magical Damage to Formless', 108: '% Magical Damage to Undead (race)',
+  109: '% Magical Damage to Brute', 110: '% Magical Damage to Plant',
+  111: '% Magical Damage to Insect', 112: '% Magical Damage to Fish',
+  113: '% Magical Damage to Demon', 114: '% Magical Damage to Demi-Human',
+  115: '% Magical Damage to Angel', 116: '% Magical Damage to Dragon',
+  279: '% Incoming Healing', 280: 'Movement Speed',
 };
 
 const OPTION_ALIASES = {
-  'hp': 1,
-  'sp': 2,
-  'str': 3,
-  'agi': 4,
-  'vit': 5,
-  'int': 6,
-  'dex': 7,
-  'luk': 8,
-  'aspd': 16,
-  'atk': 17,
-  'hit': 18,
-  'matk': 19,
-  'def': 20,
-  'mdef': 21,
-  'pdodge': 23,
-  'crit': 24,
-  'critdmg': 164,
-  'heal': 168,
-  'cast': 170,
-  'delay': 171,
-  'freeze': 255,
-  'sc': 256,           // stone curse
-  'stone': 256,
-  'stun': 256,         // common alias
-  'spcons': 172,
-  'boss': 150,
-  'long': 167,
-  'allres': 193,
-  'allsize': 257,
-  'allrace': 258,
-  'small': 160,
-  'medium': 161,
-  'large': 162,
-  // Add more as needed
+  'hp': 1, 'sp': 2, 'str': 3, 'agi': 4, 'vit': 5, 'int': 6, 'dex': 7, 'luk': 8,
+  'aspd': 16, 'atk': 17, 'hit': 18, 'matk': 19, 'def': 20, 'mdef': 21,
+  'pdodge': 23, 'crit': 24, 'critdmg': 164, 'heal': 168,
+  'cast': 170, 'delay': 171, 'freeze': 255, 'sc': 256, 'stone': 256, 'stun': 256,
+  'spcons': 172, 'boss': 150, 'long': 167, 'allres': 193,
+  'allsize': 257, 'allrace': 258, 'small': 160, 'medium': 161, 'large': 162,
 };
 
 const nameCache = new Map();
@@ -182,47 +98,51 @@ function itemPageUrl(nameid) {
   return `${ITEM_PAGE_BASE}/${nameid}`;
 }
 
-/**
- * Parse command query into item query + optional option filter
- */
+// Parse query with multiple options
 function parseWsQuery(fullQuery) {
   const parts = fullQuery.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return { itemQuery: parts[0], optionId: null };
-  }
-  const itemQuery = parts.slice(0, -1).join(' ');
-  let lastPart = parts[parts.length - 1];
+  const optionIds = [];
+  let itemParts = [];
 
-  // Try option ID
-  const asNum = parseInt(lastPart);
-  if (!isNaN(asNum) && OPTION_MAP[asNum]) {
-    return { itemQuery, optionId: asNum };
-  }
-
-  // Try alias
-  const aliasId = OPTION_ALIASES[normalize(lastPart)];
-  if (aliasId) {
-    return { itemQuery, optionId: aliasId };
-  }
-
-  // Try option name match (partial)
-  const lowerOpt = normalize(lastPart);
-  for (const [id, label] of Object.entries(OPTION_MAP)) {
-    if (normalize(label).includes(lowerOpt)) {
-      return { itemQuery, optionId: parseInt(id) };
+  for (const part of parts) {
+    const num = parseInt(part);
+    if (!isNaN(num) && OPTION_MAP[num]) {
+      optionIds.push(num);
+      continue;
     }
+
+    const aliasId = OPTION_ALIASES[normalize(part)];
+    if (aliasId !== undefined) {
+      optionIds.push(aliasId);
+      continue;
+    }
+
+    // Partial name match for options
+    const lower = normalize(part);
+    let found = false;
+    for (const [id, label] of Object.entries(OPTION_MAP)) {
+      if (normalize(label).includes(lower)) {
+        optionIds.push(parseInt(id));
+        found = true;
+        break;
+      }
+    }
+    if (!found) itemParts.push(part);
   }
 
-  // Fallback: treat last part as part of item name
-  return { itemQuery: fullQuery, optionId: null };
+  return {
+    itemQuery: itemParts.join(' '),
+    optionIds: [...new Set(optionIds)]
+  };
 }
 
-/**
- * Check if a listing has the desired option
- */
-function hasOption(listing, targetOptionId) {
+function hasAllOptions(listing, targetOptionIds) {
+  if (!targetOptionIds || targetOptionIds.length === 0) return true;
   if (!Array.isArray(listing.options) || listing.options.length === 0) return false;
-  return listing.options.some(opt => opt.id === targetOptionId);
+
+  return targetOptionIds.every(id => 
+    listing.options.some(opt => opt.id === id)
+  );
 }
 
 function buildListingBlock(listing, opts = {}) {
@@ -240,8 +160,7 @@ function buildListingBlock(listing, opts = {}) {
   const refinePrefix = listing.refine ? `+${listing.refine} ` : '';
   const displayName = item_name || listing.item_name || `Item #${nameid}`;
   const url = itemPageUrl(nameid || listing.nameid);
-  const titleLine = `${refinePrefix}[${displayName}](${url})`;
-  lines.push(titleLine);
+  lines.push(`${refinePrefix}[${displayName}](${url})`);
 
   if (Array.isArray(listing.cards) && listing.cards.length > 0) {
     const cardList = listing.cards.map((c) => c.name).join(' | ');
@@ -340,7 +259,7 @@ function resolveItem(query) {
   return null;
 }
 
-// ─── Deal scanner ─────────────────────────────────────────────────────────
+// Deal scanner (unchanged)
 async function scanForDeals(channel) {
   console.log('[Market] Scanning for deals...');
   alertedDealsThisCycle = new Set();
@@ -381,7 +300,6 @@ async function scanForDeals(channel) {
   if (deals.length === 0) { console.log('[Market] No deals found.'); return; }
 
   deals.sort((a, b) => (a.minPrice / a.medianPrice) - (b.minPrice / b.medianPrice));
-  console.log(`[Market] ${deals.length} deals found, posting...`);
 
   const dealBlocks = deals.map((deal) => {
     const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
@@ -419,9 +337,11 @@ async function scanForDeals(channel) {
   }
 }
 
-// ─── @ws — Who Sells ───────────────────────────────────────────────────────
+// @ws handler with multiple options
 async function handleWhoSells(message, fullQuery) {
-  const { itemQuery, optionId } = parseWsQuery(fullQuery);
+  const { itemQuery, optionIds } = parseWsQuery(fullQuery);
+  if (!itemQuery) return message.reply('❌ Please specify an item name or ID.');
+
   const nameid = resolveItem(itemQuery);
   if (!nameid) return message.reply(`❌ Item \`${itemQuery}\` not found. Try the item ID number.`);
 
@@ -431,15 +351,16 @@ async function handleWhoSells(message, fullQuery) {
 
   const item_name = listings[0]?.item_name || nameCache.get(nameid) || `Item #${nameid}`;
 
-  if (!listings || listings.length === 0) {
+  if (listings.length === 0) {
     return message.reply(`📦 No one is selling **${item_name}** right now.`);
   }
 
   let filtered = listings;
-  if (optionId) {
-    filtered = listings.filter(l => hasOption(l, optionId));
+  if (optionIds.length > 0) {
+    filtered = listings.filter(l => hasAllOptions(l, optionIds));
     if (filtered.length === 0) {
-      return message.reply(`📦 No listings found for **${item_name}** with option **${OPTION_MAP[optionId] || optionId}**.`);
+      const opts = optionIds.map(id => OPTION_MAP[id] || id).join(', ');
+      return message.reply(`📦 No listings found for **${item_name}** with all options: **${opts}**`);
     }
   }
 
@@ -451,8 +372,10 @@ async function handleWhoSells(message, fullQuery) {
     return lines.join('\n');
   });
 
+  const optText = optionIds.length > 0 ? ` [${optionIds.map(id => OPTION_MAP[id] || id).join(' + ')}]` : '';
+
   const embed = new EmbedBuilder()
-    .setTitle(`🛒 ${item_name} (${nameid})${optionId ? ` [${OPTION_MAP[optionId]}]` : ''}`)
+    .setTitle(`🛒 ${item_name} (${nameid})${optText}`)
     .setURL(itemPageUrl(nameid))
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
@@ -467,7 +390,7 @@ async function handleWhoSells(message, fullQuery) {
   return message.reply({ embeds: [embed] });
 }
 
-// ─── @ph — Price History ───────────────────────────────────────────────────
+// @ph handler
 async function handlePriceHistory(message, query) {
   const nameid = resolveItem(query);
   if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
@@ -515,7 +438,7 @@ async function handlePriceHistory(message, query) {
   return message.reply({ embeds: [embed] });
 }
 
-// ─── Bot Ready ────────────────────────────────────────────────────────────
+// Bot Ready
 client.once('ready', async () => {
   console.log(`[Market Bot] Logged in as ${client.user.tag}`);
   await buildNameCache().catch(console.error);
@@ -526,7 +449,7 @@ client.once('ready', async () => {
   console.log(`[Market Bot] Scanning every ${SCAN_INTERVAL_MS / 60000} min.`);
 });
 
-// ─── Message Handler ──────────────────────────────────────────────────────
+// Message Handler
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channelId !== MARKET_CHANNEL_ID) return;
