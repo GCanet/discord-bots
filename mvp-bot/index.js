@@ -12,9 +12,15 @@ const client = new Client({
 
 const MVP_CHANNEL_ID = process.env.MVP_CHANNEL_ID;
 
+const LEGEND = [
+  '`<boss name>` — register kill & start timer',
+  '`!current` — list all active timers',
+  '`!remove <name>` — delete a timer',
+  '`!edit <name>` — reset kill time to now',
+].join('\n');
+
 // ─── Build lookup index ────────────────────────────────────────────────────
-// Map: normalizedName -> [boss, boss, ...] (array because same name can have multiple entries)
-const bossLookup = new Map(); // normalized string -> boss[]
+const bossLookup = new Map();
 
 function normalize(str) {
   return str.toLowerCase().trim().replace(/\s+/g, ' ');
@@ -29,11 +35,7 @@ for (const boss of bossData.bosses) {
 }
 
 // ─── Active timers ─────────────────────────────────────────────────────────
-// Map<key, { boss, killTime, minSpawn, maxSpawn, killerId, messageId, timerId }>
-// key = `${boss.bossName}_${boss.location}`
 const activeTimers = new Map();
-
-// Pending disambiguation: userId -> { matches: boss[], message }
 const pendingDisambig = new Map();
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -47,7 +49,7 @@ function buildTimerEmbed(boss, killTime, minSpawn, maxSpawn) {
   const minTs = Math.floor(minSpawn / 1000);
   const maxTs = Math.floor(maxSpawn / 1000);
 
-  const embed = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle(`☠️ ${boss.bossName}`)
     .setColor(0xe74c3c)
     .setThumbnail(`https://static.divine-pride.net/images/mobs/png/${boss.ID}.png`)
@@ -56,20 +58,21 @@ function buildTimerEmbed(boss, killTime, minSpawn, maxSpawn) {
       { name: '⚔️ Killed at', value: `<t:${killTs}:T>`, inline: true },
       { name: '\u200B', value: '\u200B', inline: true },
       { name: '🔁 Min Spawn', value: `<t:${minTs}:F> (<t:${minTs}:R>)`, inline: true },
-      { name: '🔁 Max Spawn', value: `<t:${maxTs}:F> (<t:${maxTs}:R>)`, inline: true }
+      { name: '🔁 Max Spawn', value: `<t:${maxTs}:F> (<t:${maxTs}:R>)`, inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '📋 Commands', value: LEGEND, inline: false }
     )
     .setFooter({ text: `${boss.race} • ${boss.property} • HP: ${formatHp(boss.HP)}` })
     .setTimestamp();
-
-  return embed;
 }
 
 function buildCurrentListEmbed(timers) {
+  const base = new EmbedBuilder()
+    .setColor(0x3498db)
+    .addFields({ name: '📋 Commands', value: LEGEND, inline: false });
+
   if (timers.length === 0) {
-    return new EmbedBuilder()
-      .setTitle('📋 Current MVP Timers')
-      .setColor(0x3498db)
-      .setDescription('No active timers.');
+    return base.setTitle('📋 Current MVP Timers').setDescription('No active timers.');
   }
 
   const now = Date.now();
@@ -81,18 +84,14 @@ function buildCurrentListEmbed(timers) {
     return `**${boss.bossName}** (${boss.location || '?'})\n${status} — max <t:${maxTs}:t>`;
   });
 
-  return new EmbedBuilder()
+  return base
     .setTitle(`📋 Current MVP Timers (${timers.length})`)
-    .setColor(0x3498db)
     .setDescription(lines.join('\n\n'));
 }
 
 function scheduleSpawnReminder(boss, minSpawn, killerId, channel) {
-  const reminderTime = minSpawn - 10 * 60 * 1000; // 10 min before min spawn
-  const delay = reminderTime - Date.now();
-
-  if (delay <= 0) return null; // Already past reminder time
-
+  const delay = minSpawn - 10 * 60 * 1000 - Date.now();
+  if (delay <= 0) return null;
   return setTimeout(async () => {
     try {
       const minTs = Math.floor(minSpawn / 1000);
@@ -107,21 +106,29 @@ function scheduleSpawnReminder(boss, minSpawn, killerId, channel) {
 
 function registerBossKill(boss, killTime, killerId, channel) {
   const key = `${boss.bossName}_${boss.location}`;
-
-  // Clear existing timer if re-killed
   if (activeTimers.has(key)) {
     const old = activeTimers.get(key);
     if (old.timerId) clearTimeout(old.timerId);
   }
-
   const minSpawn = killTime + boss.minRespawnTimeScheduleInSeconds * 1000;
   const maxSpawn = killTime + boss.maxRespawnTimeScheduleInSeconds * 1000;
-
   const timerId = scheduleSpawnReminder(boss, minSpawn, killerId, channel);
-
   activeTimers.set(key, { boss, killTime, minSpawn, maxSpawn, killerId, timerId });
-
   return { minSpawn, maxSpawn };
+}
+
+function findTimerByName(query) {
+  const lower = normalize(query);
+  // Try exact key match
+  for (const [key, timer] of activeTimers.entries()) {
+    if (normalize(timer.boss.bossName) === lower) return { key, timer };
+    if (timer.boss.alias && timer.boss.alias.some(a => normalize(a) === lower)) return { key, timer };
+  }
+  // Try partial
+  for (const [key, timer] of activeTimers.entries()) {
+    if (normalize(timer.boss.bossName).includes(lower)) return { key, timer };
+  }
+  return null;
 }
 
 // ─── Bot Ready ────────────────────────────────────────────────────────────
@@ -137,11 +144,35 @@ client.on('messageCreate', async (message) => {
   const content = message.content.trim();
   const userId = message.author.id;
 
-  // !current command
+  // !current
   if (content.toLowerCase() === '!current') {
     const timers = Array.from(activeTimers.values()).sort((a, b) => a.minSpawn - b.minSpawn);
-    const embed = buildCurrentListEmbed(timers);
-    return message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [buildCurrentListEmbed(timers)] });
+  }
+
+  // !remove <name>
+  if (content.toLowerCase().startsWith('!remove')) {
+    const query = content.slice(7).trim();
+    if (!query) return message.reply('❌ Usage: `!remove <boss name>`');
+    const found = findTimerByName(query);
+    if (!found) return message.reply(`❌ No active timer found for \`${query}\`.`);
+    if (found.timer.timerId) clearTimeout(found.timer.timerId);
+    activeTimers.delete(found.key);
+    return message.reply(`✅ Timer for **${found.timer.boss.bossName}** removed.`);
+  }
+
+  // !edit <name> — reset kill time to now
+  if (content.toLowerCase().startsWith('!edit')) {
+    const query = content.slice(5).trim();
+    if (!query) return message.reply('❌ Usage: `!edit <boss name>`');
+    const found = findTimerByName(query);
+    if (!found) return message.reply(`❌ No active timer found for \`${query}\`. Register the kill first by typing the boss name.`);
+    const { boss, killerId } = found.timer;
+    if (found.timer.timerId) clearTimeout(found.timer.timerId);
+    const killTime = Date.now();
+    const { minSpawn, maxSpawn } = registerBossKill(boss, killTime, killerId, message.channel);
+    const embed = buildTimerEmbed(boss, killTime, minSpawn, maxSpawn);
+    return message.reply({ content: `✅ Timer for **${boss.bossName}** reset to now.`, embeds: [embed] });
   }
 
   // ── Handle disambiguation reply ────────────────────────────────────────
@@ -151,33 +182,25 @@ client.on('messageCreate', async (message) => {
     if (!isNaN(choice) && choice >= 1 && choice <= matches.length) {
       pendingDisambig.delete(userId);
       const boss = matches[choice - 1];
-
       if (!boss.minRespawnTimeScheduleInSeconds) {
         return message.reply(`⚠️ **${boss.bossName}** has no standard respawn timer (instance/event boss).`);
       }
-
       const killTime = message.createdTimestamp;
       const { minSpawn, maxSpawn } = registerBossKill(boss, killTime, userId, message.channel);
-      const embed = buildTimerEmbed(boss, killTime, minSpawn, maxSpawn);
-      return message.reply({ embeds: [embed] });
+      return message.reply({ embeds: [buildTimerEmbed(boss, killTime, minSpawn, maxSpawn)] });
     } else {
-      return message.reply(`❌ Invalid choice. Please reply with a number between 1 and ${matches.length}.`);
+      return message.reply(`❌ Invalid choice. Reply with a number between 1 and ${matches.length}.`);
     }
   }
 
   // ── Boss name detection ────────────────────────────────────────────────
-  // Try exact match first, then partial match
   const lower = normalize(content);
   let matches = bossLookup.get(lower) || [];
 
-  // Partial/fuzzy search if no exact match
   if (matches.length === 0) {
     for (const [key, bosses] of bossLookup.entries()) {
-      if (key.includes(lower) || lower.includes(key)) {
-        matches = matches.concat(bosses);
-      }
+      if (key.includes(lower) || lower.includes(key)) matches = matches.concat(bosses);
     }
-    // deduplicate by bossName+location
     const seen = new Set();
     matches = matches.filter((b) => {
       const k = `${b.bossName}_${b.location}`;
@@ -187,9 +210,8 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  if (matches.length === 0) return; // Not a boss name, ignore silently
+  if (matches.length === 0) return;
 
-  // ── Single match ──────────────────────────────────────────────────────
   if (matches.length === 1) {
     const boss = matches[0];
     if (!boss.minRespawnTimeScheduleInSeconds) {
@@ -197,20 +219,14 @@ client.on('messageCreate', async (message) => {
     }
     const killTime = message.createdTimestamp;
     const { minSpawn, maxSpawn } = registerBossKill(boss, killTime, userId, message.channel);
-    const embed = buildTimerEmbed(boss, killTime, minSpawn, maxSpawn);
-    return message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [buildTimerEmbed(boss, killTime, minSpawn, maxSpawn)] });
   }
 
-  // ── Multiple matches — need disambiguation ─────────────────────────────
+  // Disambiguation
   pendingDisambig.set(userId, { matches });
-
-  // Auto-expire disambiguation after 60 seconds
   setTimeout(() => pendingDisambig.delete(userId), 60000);
-
   const options = matches.map((b, i) => `\`${i + 1}\` — **${b.bossName}** (${b.location || 'unknown map'})`).join('\n');
-  return message.reply(
-    `🤔 Multiple bosses found for **"${content}"**. Which one died?\n\n${options}\n\nReply with the number.`
-  );
+  return message.reply(`🤔 Multiple bosses found for **"${content}"**. Which one died?\n\n${options}\n\nReply with the number.`);
 });
 
 client.login(process.env.DISCORD_TOKEN);

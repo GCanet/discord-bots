@@ -1,5 +1,8 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, ChannelType, EmbedBuilder } = require('discord.js');
+const {
+  Client, GatewayIntentBits, ChannelType, EmbedBuilder,
+  ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
+} = require('discord.js');
 
 const client = new Client({
   intents: [
@@ -140,41 +143,25 @@ const INSTANCE_TEMPLATES = {
   },
 };
 
-// aliases for instance names
 const INSTANCE_ALIASES = {
-  ifrith: 'ifirth',
-  ifrit: 'ifirth',
-  ifirth: 'ifirth',
-  valkyrie: 'valk',
-  valk: 'valk',
-  'valkyrie randgris': 'valk',
-  biolabs: 'bio3',
-  bio3: 'bio3',
-  'biolabs 3': 'bio3',
-  'endless tower': 'et',
-  et: 'et',
-  'sealed shrine': 'sealed shrine',
-  ss: 'sealed shrine',
-  beelzebub: 'bee',
-  bee: 'bee',
-  captain: 'captain',
-  'ghost ship': 'captain',
-  'ghost ship captain': 'captain',
+  ifrith: 'ifirth', ifrit: 'ifirth', ifirth: 'ifirth',
+  valkyrie: 'valk', valk: 'valk', 'valkyrie randgris': 'valk',
+  biolabs: 'bio3', bio3: 'bio3', 'biolabs 3': 'bio3',
+  'endless tower': 'et', et: 'et',
+  'sealed shrine': 'sealed shrine', ss: 'sealed shrine',
+  beelzebub: 'bee', bee: 'bee',
+  captain: 'captain', 'ghost ship': 'captain', 'ghost ship captain': 'captain',
 };
 
-// ─── Active Threads State ──────────────────────────────────────────────────
-// Map<threadId, { instanceKey, slots, creatorId, hour, mainMessageId }>
+// Map<threadId, { instanceKey, slots, creatorId, hour, mainMessageId, dropdownMessageId }>
 const activeInstances = new Map();
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function deepCopySlots(slots) {
-  return slots.map((s) => ({ ...s }));
-}
+function deepCopySlots(slots) { return slots.map((s) => ({ ...s })); }
 
 function resolveInstanceKey(input) {
-  const lower = input.toLowerCase().trim();
-  return INSTANCE_ALIASES[lower] || null;
+  return INSTANCE_ALIASES[input.toLowerCase().trim()] || null;
 }
 
 function buildPartyEmbed(instanceKey, slots, hour, creatorId) {
@@ -184,10 +171,20 @@ function buildPartyEmbed(instanceKey, slots, hour, creatorId) {
 
   const lines = slots.map((s, i) => {
     const num = `\`${String(i + 1).padStart(2, '0')}.\``;
-    const role = `**${s.role}**`;
     const player = s.player ? `<@${s.userId}>` : '—';
-    return `${num} ${role}: ${player}`;
+    return `${num} **${s.role}**: ${player}`;
   });
+
+  const commands = [
+    '`$job` — sign up by role (e.g. `$hw`, `$sniper1`, `$hp1`)',
+    '`$number` — sign up by slot number (e.g. `$3`)',
+    '`$swap $job` or `$swap $number` — change your role',
+    '`$out` — remove yourself',
+    '`$clear <number>` — (creator) clear a slot',
+    tpl.hasFillSpots ? '`$fill` — sign up for a fill spot' : '',
+    '`$hournew <unix_timestamp>` — set instance time | `$hour help` for info',
+    '↕️ Or use the **dropdown below** to pick your role',
+  ].filter(Boolean).join('\n');
 
   const embed = new EmbedBuilder()
     .setTitle(`${tpl.fullName} Party${isFull ? ' ✅ FULL' : ''}`)
@@ -202,30 +199,48 @@ function buildPartyEmbed(instanceKey, slots, hour, creatorId) {
     embed.addFields({ name: '🕐 Instance Time', value: `<t:${hour}:F> (<t:${hour}:R>)`, inline: false });
   }
 
-  embed.addFields({
-    name: '📋 Commands',
-    value: [
-      '`$job` — Sign up (e.g. `$sniper1`, `$hw`, `$hp1`)',
-      '`$number` — Sign up by slot number (e.g. `$3`)',
-      '`$swap $job` or `$swap $number` — Change your role',
-      '`$out` — Remove yourself from the party',
-      '`$clear number` — (Creator) Clear a slot',
-      tpl.hasFillSpots ? '`$fill` — Sign up for a fill spot (open signup)' : '',
-      '`$hour help` — How to set the instance time',
-      '`$hournew <unix_timestamp>` — Update the instance time',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  });
+  embed.addFields({ name: '📋 Commands', value: commands });
 
   return embed;
+}
+
+function buildDropdown(instanceKey, slots) {
+  const tpl = INSTANCE_TEMPLATES[instanceKey];
+  const options = slots.map((s, i) => {
+    const taken = s.player !== null;
+    const label = `${String(i + 1).padStart(2, '0')}. ${s.role}${taken ? ` (${s.player})` : ''}`;
+    return new StringSelectMenuOptionBuilder()
+      .setLabel(label.slice(0, 100))
+      .setValue(String(i))
+      .setDescription(taken ? `Taken by ${s.player}` : 'Available')
+      .setEmoji(taken ? '🔴' : '🟢');
+  });
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('instance_signup')
+    .setPlaceholder('Select a role to sign up...')
+    .addOptions(options);
+
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+async function updateMainMessage(thread, state) {
+  try {
+    const msg = await thread.messages.fetch(state.mainMessageId);
+    const row = buildDropdown(state.instanceKey, state.slots);
+    await msg.edit({
+      embeds: [buildPartyEmbed(state.instanceKey, state.slots, state.hour, state.creatorId)],
+      components: [row],
+    });
+  } catch (e) {
+    console.error('Failed to update main message:', e.message);
+  }
 }
 
 function findSlotByRole(slots, roleInput) {
   const lower = roleInput.toLowerCase().replace(/\s+/g, '');
   for (let i = 0; i < slots.length; i++) {
-    const slotRole = slots[i].role.toLowerCase().replace(/\s+/g, '');
-    if (slotRole === lower) return i;
+    if (slots[i].role.toLowerCase().replace(/\s+/g, '') === lower) return i;
   }
   return -1;
 }
@@ -234,18 +249,70 @@ function findPlayerSlot(slots, userId) {
   return slots.findIndex((s) => s.userId === userId);
 }
 
-async function updateMainMessage(thread, state) {
-  try {
-    const msg = await thread.messages.fetch(state.mainMessageId);
-    await msg.edit({ embeds: [buildPartyEmbed(state.instanceKey, state.slots, state.hour, state.creatorId)] });
-  } catch (e) {
-    console.error('Failed to update main message:', e.message);
-  }
-}
-
 // ─── Bot Ready ────────────────────────────────────────────────────────────
 client.once('ready', () => {
   console.log(`[Instance Bot] Logged in as ${client.user.tag}`);
+});
+
+// ─── Dropdown interaction handler ─────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isStringSelectMenu()) return;
+  if (interaction.customId !== 'instance_signup') return;
+
+  const thread = interaction.channel;
+  const state = activeInstances.get(thread.id);
+  if (!state) return interaction.reply({ content: '❌ This instance is no longer active.', ephemeral: true });
+
+  const { slots } = state;
+  const userId = interaction.user.id;
+  const username = interaction.member?.displayName || interaction.user.username;
+  const targetIdx = parseInt(interaction.values[0]);
+
+  // Check party full
+  const filledCount = slots.filter((s) => s.player !== null).length;
+  if (filledCount === 12) {
+    return interaction.reply({ content: '❌ The party is full!', ephemeral: true });
+  }
+
+  // Fill spot check
+  if (slots[targetIdx].role === 'FILL SPOT') {
+    const existing = findPlayerSlot(slots, userId);
+    if (existing !== -1) {
+      return interaction.reply({ content: `❌ You're already in slot ${existing + 1} as **${slots[existing].role}**.`, ephemeral: true });
+    }
+    if (slots[targetIdx].player !== null) {
+      return interaction.reply({ content: `❌ That fill spot is already taken.`, ephemeral: true });
+    }
+    slots[targetIdx].player = username;
+    slots[targetIdx].userId = userId;
+  } else {
+    // Slot already taken by someone else
+    if (slots[targetIdx].player !== null && slots[targetIdx].userId !== userId) {
+      return interaction.reply({
+        content: `❌ **${slots[targetIdx].role}** is already taken by <@${slots[targetIdx].userId}>.`,
+        ephemeral: true,
+      });
+    }
+    // Clear previous slot
+    const existingIdx = findPlayerSlot(slots, userId);
+    if (existingIdx !== -1 && existingIdx !== targetIdx) {
+      slots[existingIdx].player = null;
+      slots[existingIdx].userId = null;
+    }
+    slots[targetIdx].player = username;
+    slots[targetIdx].userId = userId;
+  }
+
+  await updateMainMessage(thread, state);
+
+  const newFilled = slots.filter((s) => s.player !== null).length;
+  let reply = `✅ Signed up as **${slots[targetIdx].role}** (slot ${targetIdx + 1}).`;
+  if (newFilled === 12) {
+    reply += '\n🎉 Party is full!';
+    await thread.send('@here 🎉 **The party is now full!**');
+  }
+
+  return interaction.reply({ content: reply, ephemeral: true });
 });
 
 // ─── Message Handler ──────────────────────────────────────────────────────
@@ -253,64 +320,51 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   const content = message.content.trim();
 
-  // ── !instance command (any channel) ──────────────────────────────────────
+  // !instance command
   if (content.toLowerCase().startsWith('!instance')) {
     const args = content.slice('!instance'.length).trim();
     if (!args) {
-      return message.reply(
-        '❌ Please specify an instance. Available: `ifirth`, `valk`, `bio3`, `et`, `sealed shrine`, `bee`, `captain`'
-      );
+      return message.reply('❌ Available: `ifirth`, `valk`, `bio3`, `et`, `sealed shrine`, `bee`, `captain`');
     }
-
     const instanceKey = resolveInstanceKey(args);
     if (!instanceKey) {
-      return message.reply(
-        `❌ Unknown instance \`${args}\`. Available: \`ifirth\`, \`valk\`, \`bio3\`, \`et\`, \`sealed shrine\`, \`bee\`, \`captain\``
-      );
+      return message.reply(`❌ Unknown instance \`${args}\`. Available: \`ifirth\`, \`valk\`, \`bio3\`, \`et\`, \`sealed shrine\`, \`bee\`, \`captain\``);
     }
 
     const tpl = INSTANCE_TEMPLATES[instanceKey];
     const forumChannelId = process.env.INSTANCES_FORUM_CHANNEL_ID;
     let forumChannel;
-    try {
-      forumChannel = await client.channels.fetch(forumChannelId);
-    } catch (e) {
-      return message.reply('❌ Could not find the #instances forum channel. Check INSTANCES_FORUM_CHANNEL_ID.');
-    }
+    try { forumChannel = await client.channels.fetch(forumChannelId); }
+    catch (e) { return message.reply('❌ Could not find the #instances forum channel.'); }
 
     if (forumChannel.type !== ChannelType.GuildForum) {
-      return message.reply('❌ The configured INSTANCES_FORUM_CHANNEL_ID is not a Forum channel.');
+      return message.reply('❌ INSTANCES_FORUM_CHANNEL_ID is not a Forum channel.');
     }
 
     const slots = deepCopySlots(tpl.slots);
     const embed = buildPartyEmbed(instanceKey, slots, null, message.author.id);
+    const row = buildDropdown(instanceKey, slots);
 
     let thread;
     try {
-      const result = await forumChannel.threads.create({
+      thread = await forumChannel.threads.create({
         name: tpl.fullName,
-        message: { embeds: [embed] },
+        message: { embeds: [embed], components: [row] },
       });
-      thread = result;
     } catch (e) {
       console.error(e);
-      return message.reply('❌ Failed to create thread in #instances. Make sure the bot has permissions.');
+      return message.reply('❌ Failed to create thread. Check bot permissions.');
     }
 
     const firstMessage = await thread.fetchStarterMessage();
     activeInstances.set(thread.id, {
-      instanceKey,
-      slots,
-      creatorId: message.author.id,
-      hour: null,
-      mainMessageId: firstMessage.id,
+      instanceKey, slots, creatorId: message.author.id, hour: null, mainMessageId: firstMessage.id,
     });
 
-    await message.reply(`✅ Instance thread created: ${thread.url}`);
-    return;
+    return message.reply(`✅ Instance thread created: ${thread.url}`);
   }
 
-  // ── Commands inside active instance threads ───────────────────────────────
+  // Commands inside active instance threads
   if (!message.channel.isThread()) return;
   const state = activeInstances.get(message.channel.id);
   if (!state) return;
@@ -324,27 +378,21 @@ client.on('messageCreate', async (message) => {
   // $hour help
   if (content.toLowerCase() === '$hour help') {
     return message.reply(
-      '**How to set the instance time:**\n' +
-        'Use https://www.unixtimestamp.com to get a Unix timestamp for your desired time.\n' +
-        'Then type: `$hournew <unix_timestamp>`\n' +
-        'Example: `$hournew 1716900000`\n' +
-        'Discord will display it in every member\'s local timezone automatically.'
+      '**How to set the instance time:**\nGet a Unix timestamp at https://www.unixtimestamp.com\nThen type: `$hournew <timestamp>`\nExample: `$hournew 1716900000`'
     );
   }
 
-  // $hournew <timestamp>
+  // $hournew
   if (content.toLowerCase().startsWith('$hournew')) {
-    if (userId !== creatorId) {
-      return message.reply('❌ Only the instance creator can change the time.');
-    }
+    if (userId !== creatorId) return message.reply('❌ Only the instance creator can change the time.');
     const ts = parseInt(content.split(/\s+/)[1]);
-    if (isNaN(ts)) return message.reply('❌ Invalid timestamp. Use `$hour help` for instructions.');
+    if (isNaN(ts)) return message.reply('❌ Invalid timestamp. Use `$hour help`.');
     state.hour = ts;
     await updateMainMessage(thread, state);
-    return message.reply(`✅ Instance time updated to <t:${ts}:F>`);
+    return message.reply(`✅ Instance time set to <t:${ts}:F>`);
   }
 
-  // $out — remove yourself
+  // $out
   if (content.toLowerCase() === '$out') {
     const idx = findPlayerSlot(slots, userId);
     if (idx === -1) return message.reply("❌ You're not signed up.");
@@ -354,7 +402,7 @@ client.on('messageCreate', async (message) => {
     return message.reply(`✅ ${username} removed from slot ${idx + 1}.`);
   }
 
-  // $clear <number> — creator only
+  // $clear <number>
   if (content.toLowerCase().startsWith('$clear')) {
     if (userId !== creatorId) return message.reply('❌ Only the instance creator can clear slots.');
     const num = parseInt(content.split(/\s+/)[1]);
@@ -367,50 +415,38 @@ client.on('messageCreate', async (message) => {
     return message.reply(`✅ Cleared slot ${num}${was ? ` (was ${was})` : ''}.`);
   }
 
-  // $fill — for bio3 / bee fill spots
+  // $fill
   if (content.toLowerCase() === '$fill') {
     if (!tpl.hasFillSpots) return message.reply('❌ This instance has no fill spots.');
     const fillIdx = slots.findIndex((s) => s.role === 'FILL SPOT' && s.player === null);
     if (fillIdx === -1) return message.reply('❌ All fill spots are taken!');
-    // check not already signed up
     const existing = findPlayerSlot(slots, userId);
-    if (existing !== -1) return message.reply(`❌ You're already signed up in slot ${existing + 1} as **${slots[existing].role}**.`);
+    if (existing !== -1) return message.reply(`❌ You're already in slot ${existing + 1} as **${slots[existing].role}**.`);
     slots[fillIdx].player = username;
     slots[fillIdx].userId = userId;
     await updateMainMessage(thread, state);
     const filled = slots.filter((s) => s.player !== null).length;
     let reply = `✅ ${username} signed up as **FILL SPOT** (slot ${fillIdx + 1}).`;
-    if (filled === 12) {
-      reply += '\n🎉 **Party is full! Sign-ups are closed.**';
-      await thread.send('@here 🎉 **Party is now full!**');
-    }
+    if (filled === 12) { reply += '\n🎉 Party is full!'; await thread.send('@here 🎉 **Party is now full!**'); }
     return message.reply(reply);
   }
 
-  // $swap $job or $swap $number
+  // $swap
   if (content.toLowerCase().startsWith('$swap')) {
     const swapArg = content.slice(5).trim().replace(/^\$/, '');
     if (!swapArg) return message.reply('❌ Usage: `$swap $job` or `$swap $number`');
-
     const existingIdx = findPlayerSlot(slots, userId);
-    if (existingIdx === -1) return message.reply("❌ You're not signed up. Use `$job` or `$number` to sign up first.");
-
+    if (existingIdx === -1) return message.reply("❌ You're not signed up yet.");
     let targetIdx;
     const asNum = parseInt(swapArg);
-    if (!isNaN(asNum)) {
-      targetIdx = asNum - 1;
-    } else {
-      targetIdx = findSlotByRole(slots, swapArg);
-    }
-
+    if (!isNaN(asNum)) { targetIdx = asNum - 1; }
+    else { targetIdx = findSlotByRole(slots, swapArg); }
     if (targetIdx < 0 || targetIdx >= 12) return message.reply('❌ Invalid slot.');
     if (slots[targetIdx].player !== null && slots[targetIdx].userId !== userId) {
-      return message.reply(`❌ Slot ${targetIdx + 1} (**${slots[targetIdx].role}**) is already taken by <@${slots[targetIdx].userId}>.`);
+      return message.reply(`❌ Slot ${targetIdx + 1} (**${slots[targetIdx].role}**) is taken by <@${slots[targetIdx].userId}>.`);
     }
-    // clear old slot
     slots[existingIdx].player = null;
     slots[existingIdx].userId = null;
-    // assign new slot
     slots[targetIdx].player = username;
     slots[targetIdx].userId = userId;
     await updateMainMessage(thread, state);
@@ -422,44 +458,31 @@ client.on('messageCreate', async (message) => {
     const arg = content.slice(1).trim().toLowerCase();
     if (!arg) return;
 
-    // check if full
     const filledCount = slots.filter((s) => s.player !== null).length;
-    if (filledCount === 12) return message.reply('❌ The party is full! Sign-ups are closed.');
+    if (filledCount === 12) return message.reply('❌ The party is full!');
 
-    // check already signed up
     const existingIdx = findPlayerSlot(slots, userId);
-
     let targetIdx;
     const asNum = parseInt(arg);
     if (!isNaN(asNum)) {
-      // $number signup
       targetIdx = asNum - 1;
-      if (targetIdx < 0 || targetIdx >= 12) return message.reply('❌ Slot number must be between 1 and 12.');
+      if (targetIdx < 0 || targetIdx >= 12) return message.reply('❌ Slot number must be 1-12.');
     } else {
-      // $job signup — also handle sniper1 → SNIPER 1, hp1 → HP 1, etc.
       const normalized = arg.replace(/(\D)(\d)$/, '$1 $2').toUpperCase();
       targetIdx = findSlotByRole(slots, normalized);
-      if (targetIdx === -1) {
-        // try as-is
-        targetIdx = findSlotByRole(slots, arg);
-      }
+      if (targetIdx === -1) targetIdx = findSlotByRole(slots, arg);
       if (targetIdx === -1) {
         const roles = tpl.slots.map((s) => `\`${s.role}\``).join(', ');
-        return message.reply(`❌ **${arg.toUpperCase()}** is not a role in **${tpl.fullName}**.\nAvailable roles: ${roles}`);
+        return message.reply(`❌ **${arg.toUpperCase()}** is not a role in **${tpl.fullName}**.\nAvailable: ${roles}`);
       }
     }
 
-    if (slots[targetIdx].role === 'FILL SPOT') {
-      return message.reply('❌ Use `$fill` to sign up for fill spots.');
-    }
+    if (slots[targetIdx].role === 'FILL SPOT') return message.reply('❌ Use `$fill` for fill spots.');
 
     if (slots[targetIdx].player !== null && slots[targetIdx].userId !== userId) {
-      return message.reply(
-        `❌ Slot ${targetIdx + 1} (**${slots[targetIdx].role}**) is already taken by <@${slots[targetIdx].userId}>. Use \`$swap $${slots[targetIdx].role}\` to request a swap, or pick another slot.`
-      );
+      return message.reply(`❌ Slot ${targetIdx + 1} (**${slots[targetIdx].role}**) is taken by <@${slots[targetIdx].userId}>.`);
     }
 
-    // clear previous slot if exists
     if (existingIdx !== -1 && existingIdx !== targetIdx) {
       slots[existingIdx].player = null;
       slots[existingIdx].userId = null;
@@ -471,10 +494,7 @@ client.on('messageCreate', async (message) => {
 
     const newFilled = slots.filter((s) => s.player !== null).length;
     let reply = `✅ ${username} signed up as **${slots[targetIdx].role}** (slot ${targetIdx + 1}).`;
-    if (newFilled === 12) {
-      reply += '\n🎉 **Party is full! Sign-ups are closed.**';
-      await thread.send('@here 🎉 **The party is now full!**');
-    }
+    if (newFilled === 12) { reply += '\n🎉 Party is full!'; await thread.send('@here 🎉 **The party is now full!**'); }
     return message.reply(reply);
   }
 });

@@ -12,23 +12,18 @@ const client = new Client({
 const MARKET_CHANNEL_ID = process.env.MARKET_CHANNEL_ID;
 const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
-const DEAL_THRESHOLD = 0.4; // 60% off = price <= median * 0.4
+const DEAL_THRESHOLD = 0.4; // 60% off
 
-// ─── Minimal in-memory cache ───────────────────────────────────────────────
-// Only store nameid <-> item_name mappings to support name search
-// Map<nameid, item_name> and Map<normalized_name, nameid>
-const nameCache = new Map(); // nameid (number) -> item_name (string)
-const nameToId = new Map();  // normalized name -> nameid
+const LEGEND = [
+  '`@ws <name or id>` — who sells (cheapest listings + location)',
+  '`@wb <name or id>` — price history (use as buy reference)',
+].join('\n');
 
-// Track deals already alerted this cycle to avoid duplicate pings
-// Cleared each scan cycle
+const nameCache = new Map();
+const nameToId = new Map();
 let alertedDealsThisCycle = new Set();
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function normalize(str) {
-  return str.toLowerCase().trim();
-}
+function normalize(str) { return str.toLowerCase().trim(); }
 
 function median(prices) {
   if (prices.length === 0) return 0;
@@ -47,15 +42,16 @@ function itemImageUrl(nameid) {
   return `https://static.divine-pride.net/images/items/item/${nameid}.png`;
 }
 
-// ─── API Fetch helpers (memory efficient: stream pages, don't hold all) ───
+function itemWebUrl(nameid) {
+  return `https://www.divine-pride.net/database/item/${nameid}`;
+}
 
 async function fetchPage(url) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-// Fetch listings for a specific nameid
 async function fetchItemListings(nameid) {
   let page = 1;
   const listings = [];
@@ -66,22 +62,17 @@ async function fetchItemListings(nameid) {
     listings.push(...results);
     if (!data.next) break;
     page++;
-    if (page > 20) break; // safety limit
+    if (page > 20) break;
   }
   return listings;
 }
 
-// Fetch all listings page by page, yield each page for memory efficiency
 async function* fetchAllListingsPages() {
   let page = 1;
   while (true) {
     let data;
-    try {
-      data = await fetchPage(`${BASE_URL}/?page=${page}&page_size=50`);
-    } catch (e) {
-      console.error(`Error fetching page ${page}:`, e.message);
-      break;
-    }
+    try { data = await fetchPage(`${BASE_URL}/?page=${page}&page_size=50`); }
+    catch (e) { console.error(`Error fetching page ${page}:`, e.message); break; }
     const results = data.results || data;
     if (!Array.isArray(results) || results.length === 0) break;
     yield results;
@@ -90,8 +81,6 @@ async function* fetchAllListingsPages() {
   }
 }
 
-// ─── Name cache builder ───────────────────────────────────────────────────
-// Scans a few pages to build name<->id mapping. Not exhaustive but covers common items.
 async function buildNameCache() {
   console.log('[Market] Building name cache...');
   let count = 0;
@@ -102,22 +91,16 @@ async function buildNameCache() {
         nameToId.set(normalize(item.item_name), item.nameid);
       }
     }
-    count++;
-    if (count >= 10) break; // ~500 items, enough for common items
+    if (++count >= 10) break;
   }
-  console.log(`[Market] Name cache built: ${nameCache.size} items`);
+  console.log(`[Market] Name cache: ${nameCache.size} items`);
 }
 
 function resolveItem(query) {
-  // Try as nameid first
   const asNum = parseInt(query);
   if (!isNaN(asNum)) return asNum;
-
-  // Try exact name
   const exactId = nameToId.get(normalize(query));
   if (exactId) return exactId;
-
-  // Try partial match
   const lowerQ = normalize(query);
   for (const [name, id] of nameToId.entries()) {
     if (name.includes(lowerQ)) return id;
@@ -126,43 +109,31 @@ function resolveItem(query) {
 }
 
 // ─── Deal scanner ─────────────────────────────────────────────────────────
-// Groups all listings by nameid, computes median, flags deals
 async function scanForDeals(channel) {
-  console.log('[Market] Starting deal scan...');
+  console.log('[Market] Scanning for deals...');
   alertedDealsThisCycle = new Set();
 
-  // Collect prices grouped by nameid — we only keep aggregated stats, not full listings
-  // Map<nameid, { item_name, prices: number[], cheapest: listing }>
   const byItem = new Map();
 
   for await (const page of fetchAllListingsPages()) {
     for (const item of page) {
       if (!item.nameid || !item.price || !item.amount) continue;
-
-      // Update name cache opportunistically
       if (item.item_name) {
         nameCache.set(item.nameid, item.item_name);
         nameToId.set(normalize(item.item_name), item.nameid);
       }
-
       if (!byItem.has(item.nameid)) {
         byItem.set(item.nameid, { item_name: item.item_name || `Item #${item.nameid}`, prices: [], cheapest: null });
       }
       const entry = byItem.get(item.nameid);
       entry.prices.push(item.price);
-
-      if (!entry.cheapest || item.price < entry.cheapest.price) {
-        entry.cheapest = item;
-      }
+      if (!entry.cheapest || item.price < entry.cheapest.price) entry.cheapest = item;
     }
   }
 
-  console.log(`[Market] Scanned ${byItem.size} unique items. Checking for deals...`);
-
-  // Find deals
   const deals = [];
   for (const [nameid, entry] of byItem.entries()) {
-    if (entry.prices.length < 2) continue; // Need at least 2 listings to compare
+    if (entry.prices.length < 2) continue;
     const med = median(entry.prices);
     if (med <= 0) continue;
     const minPrice = Math.min(...entry.prices);
@@ -175,68 +146,67 @@ async function scanForDeals(channel) {
     }
   }
 
-  if (deals.length === 0) {
-    console.log('[Market] No deals found this cycle.');
-    return;
-  }
+  if (deals.length === 0) { console.log('[Market] No deals found.'); return; }
 
-  console.log(`[Market] Found ${deals.length} deals! Posting to channel...`);
+  // Sort biggest discount first
+  deals.sort((a, b) => (a.minPrice / a.medianPrice) - (b.minPrice / b.medianPrice));
 
-  for (const deal of deals) {
-    try {
-      const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
-      const discount = Math.round((1 - minPrice / medianPrice) * 100);
-      const embed = new EmbedBuilder()
-        .setTitle(`🔥 DEAL: ${item_name}`)
-        .setColor(0xf1c40f)
-        .setThumbnail(itemImageUrl(nameid))
-        .addFields(
-          { name: '💰 Price', value: formatPrice(minPrice), inline: true },
-          { name: '📊 Median', value: formatPrice(medianPrice), inline: true },
-          { name: '🏷️ Discount', value: `-${discount}%`, inline: true },
-          { name: '🏪 Shop', value: cheapest.shop_title || 'Unknown', inline: true },
-          { name: '👤 Seller', value: cheapest.char_name || 'Unknown', inline: true },
-          {
-            name: '📍 Location',
-            value: cheapest.map ? `/navi ${cheapest.map} ${cheapest.x} ${cheapest.y}` : 'Unknown',
-            inline: false,
-          }
-        )
-        .setFooter({ text: `Item ID: ${nameid}` })
-        .setTimestamp();
+  console.log(`[Market] ${deals.length} deals found, posting...`);
 
-      await channel.send({ content: '@here 🔥 **Market Deal Alert!**', embeds: [embed] });
-      // Small delay between posts to avoid rate limits
-      await new Promise((r) => setTimeout(r, 1500));
-    } catch (e) {
-      console.error('Error posting deal:', e.message);
+  // Post all deals as a single list embed
+  const lines = deals.map((deal) => {
+    const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
+    const discount = Math.round((1 - minPrice / medianPrice) * 100);
+    const navi = cheapest.map ? `/navi ${cheapest.map} ${cheapest.x} ${cheapest.y}` : 'Unknown';
+    return `**${item_name}** (${nameid}) — [web](${itemWebUrl(nameid)})\n💰 ${formatPrice(minPrice)} · 📊 ${formatPrice(medianPrice)} · 🏷️ -${discount}%\n🏪 ${cheapest.shop_title || cheapest.char_name || 'Unknown'} \`${navi}\``;
+  });
+
+  // Discord embed description limit is 4096 chars — split if needed
+  const chunks = [];
+  let current = '';
+  for (const line of lines) {
+    if ((current + '\n\n' + line).length > 3800) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = current ? current + '\n\n' + line : line;
     }
+  }
+  if (current) chunks.push(current);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const embed = new EmbedBuilder()
+      .setTitle(i === 0 ? `🔥 Market Deals (${deals.length})` : `🔥 Market Deals (cont.)`)
+      .setColor(0xf1c40f)
+      .setDescription(chunks[i])
+      .setTimestamp();
+
+    if (i === chunks.length - 1) {
+      embed.addFields({ name: '📋 Commands', value: LEGEND });
+    }
+
+    await channel.send({ embeds: [embed] });
+    await new Promise((r) => setTimeout(r, 1500));
   }
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────
-
 async function handleWhoSells(message, query) {
   const nameid = resolveItem(query);
-  if (!nameid) {
-    return message.reply(`❌ Item \`${query}\` not found. Try using the item ID number.`);
-  }
+  if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
 
   let listings;
-  try {
-    listings = await fetchItemListings(nameid);
-  } catch (e) {
-    return message.reply('❌ Failed to fetch market data. Try again later.');
-  }
+  try { listings = await fetchItemListings(nameid); }
+  catch (e) { return message.reply('❌ Failed to fetch market data. Try again later.'); }
+
+  const item_name = listings[0]?.item_name || nameCache.get(nameid) || `Item #${nameid}`;
 
   if (!listings || listings.length === 0) {
-    return message.reply(`📦 No one is selling \`${nameCache.get(nameid) || `Item #${nameid}`}\` right now.`);
+    return message.reply(`📦 No one is selling **${item_name}** (${nameid}) right now.`);
   }
 
-  const item_name = listings[0].item_name || nameCache.get(nameid) || `Item #${nameid}`;
   const sorted = listings.sort((a, b) => a.price - b.price).slice(0, 8);
-  const prices = listings.map((l) => l.price);
-  const med = median(prices);
+  const med = median(listings.map((l) => l.price));
 
   const lines = sorted.map((l) => {
     const navi = l.map ? `/navi ${l.map} ${l.x} ${l.y}` : 'Unknown';
@@ -244,46 +214,39 @@ async function handleWhoSells(message, query) {
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`🛒 Who Sells: ${item_name}`)
+    .setTitle(`🛒 ${item_name} (${nameid}) — [web](${itemWebUrl(nameid)})`)
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
     .setDescription(lines.join('\n'))
     .addFields(
-      { name: '📊 Median Price', value: formatPrice(med), inline: true },
-      { name: '📦 Total Listings', value: `${listings.length}`, inline: true }
+      { name: '📊 Median', value: formatPrice(med), inline: true },
+      { name: '📦 Listings', value: `${listings.length}`, inline: true },
+      { name: '📋 Commands', value: LEGEND, inline: false }
     )
-    .setFooter({ text: `ID: ${nameid} • Showing cheapest ${sorted.length} of ${listings.length}` });
+    .setFooter({ text: `Showing cheapest ${sorted.length} of ${listings.length}` });
 
   return message.reply({ embeds: [embed] });
 }
 
 async function handleWhoBuys(message, query) {
-  // The API is vending/shop focused; "who buys" is often not in vending APIs
-  // We'll show buy shop listings if available (looking for buy shops in market data)
-  // For now, show price history as a buying reference
   const nameid = resolveItem(query);
-  if (!nameid) {
-    return message.reply(`❌ Item \`${query}\` not found. Try using the item ID number.`);
-  }
+  if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
 
   let history;
   try {
     const res = await fetch(`${BASE_URL}/history/?nameid=${nameid}`);
     history = await res.json();
-  } catch (e) {
-    return message.reply('❌ Failed to fetch market history.');
-  }
+  } catch (e) { return message.reply('❌ Failed to fetch market history.'); }
 
   const item_name = nameCache.get(nameid) || `Item #${nameid}`;
   const results = history.results || history;
 
   if (!Array.isArray(results) || results.length === 0) {
-    return message.reply(`📦 No sale history found for \`${item_name}\`.`);
+    return message.reply(`📦 No sale history found for **${item_name}** (${nameid}).`);
   }
 
   const recent = results.slice(0, 6);
-  const prices = recent.map((r) => r.price);
-  const med = median(prices);
+  const med = median(recent.map((r) => r.price));
 
   const lines = recent.map((r) => {
     const date = r.listed_at ? new Date(r.listed_at).toLocaleDateString() : '?';
@@ -291,12 +254,15 @@ async function handleWhoBuys(message, query) {
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`💰 Sale History: ${item_name}`)
+    .setTitle(`💰 ${item_name} (${nameid}) — [web](${itemWebUrl(nameid)})`)
     .setColor(0xe67e22)
     .setThumbnail(itemImageUrl(nameid))
     .setDescription(lines.join('\n'))
-    .addFields({ name: '📊 Recent Median', value: formatPrice(med), inline: true })
-    .setFooter({ text: `ID: ${nameid} • Recent sales (use this as buy price reference)` });
+    .addFields(
+      { name: '📊 Recent Median', value: formatPrice(med), inline: true },
+      { name: '📋 Commands', value: LEGEND, inline: false }
+    )
+    .setFooter({ text: 'Recent sales — use as buy price reference' });
 
   return message.reply({ embeds: [embed] });
 }
@@ -304,45 +270,23 @@ async function handleWhoBuys(message, query) {
 // ─── Bot Ready ────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`[Market Bot] Logged in as ${client.user.tag}`);
-
-  // Build initial name cache
   await buildNameCache().catch(console.error);
-
   const channel = await client.channels.fetch(MARKET_CHANNEL_ID).catch(() => null);
-  if (!channel) {
-    console.error('[Market Bot] Could not find MARKET_CHANNEL_ID!');
-    return;
-  }
-
-  // Initial scan on startup
+  if (!channel) { console.error('[Market Bot] Channel not found!'); return; }
   await scanForDeals(channel).catch(console.error);
-
-  // Recurring scan
-  setInterval(async () => {
-    await scanForDeals(channel).catch(console.error);
-  }, SCAN_INTERVAL_MS);
-
-  console.log(`[Market Bot] Deal scanner running every ${SCAN_INTERVAL_MS / 60000} minutes.`);
+  setInterval(() => scanForDeals(channel).catch(console.error), SCAN_INTERVAL_MS);
+  console.log(`[Market Bot] Scanning every ${SCAN_INTERVAL_MS / 60000} min.`);
 });
 
 // ─── Message Handler ──────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channelId !== MARKET_CHANNEL_ID) return;
-
   const content = message.content.trim();
-
-  // @ws or !ws — who sells
   const wsMatch = content.match(/^[@!]ws\s+(.+)/i);
-  if (wsMatch) {
-    return handleWhoSells(message, wsMatch[1].trim());
-  }
-
-  // @wb or !wb — who buys (price history)
+  if (wsMatch) return handleWhoSells(message, wsMatch[1].trim());
   const wbMatch = content.match(/^[@!]wb\s+(.+)/i);
-  if (wbMatch) {
-    return handleWhoBuys(message, wbMatch[1].trim());
-  }
+  if (wbMatch) return handleWhoBuys(message, wbMatch[1].trim());
 });
 
 client.login(process.env.DISCORD_TOKEN);
