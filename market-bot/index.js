@@ -11,6 +11,7 @@ const client = new Client({
 
 const MARKET_CHANNEL_ID = process.env.MARKET_CHANNEL_ID;
 const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
+const ITEM_PAGE_BASE = 'https://revenantelegy.com/database/item';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
 const DEAL_THRESHOLD = 0.25; // 75% off
 
@@ -37,6 +38,30 @@ function formatPrice(p) {
 
 function itemImageUrl(nameid) {
   return `https://static.divine-pride.net/images/items/item/${nameid}.png`;
+}
+
+function itemPageUrl(nameid) {
+  return `${ITEM_PAGE_BASE}/${nameid}`;
+}
+
+/**
+ * Format random options, refine, and cards from a listing into readable lines.
+ * Returns an array of strings (may be empty if none present).
+ */
+function formatItemExtras(listing) {
+  const lines = [];
+  if (listing.refine) {
+    lines.push(`✨ Refine: **+${listing.refine}**`);
+  }
+  if (Array.isArray(listing.options) && listing.options.length > 0) {
+    const optLabels = listing.options.map((o, i) => `${i + 1}. ${o.label}`).join(', ');
+    lines.push(`🎲 Options: ${optLabels}`);
+  }
+  if (Array.isArray(listing.cards) && listing.cards.length > 0) {
+    const cardNames = listing.cards.map((c) => c.name).join(', ');
+    lines.push(`🃏 Cards: ${cardNames}`);
+  }
+  return lines;
 }
 
 async function fetchPage(url) {
@@ -146,21 +171,26 @@ async function scanForDeals(channel) {
 
   console.log(`[Market] ${deals.length} deals found, posting...`);
 
-  // Build list with restored field titles
   const lines = deals.map((deal) => {
     const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
     const discount = Math.round((1 - minPrice / medianPrice) * 100);
     const navi = cheapest.map ? `/navi ${cheapest.map} ${cheapest.x} ${cheapest.y}` : 'Unknown';
-    return [
-      `**${item_name}** (${nameid})`,
+    const webLink = `[🔗 View](${itemPageUrl(nameid)})`;
+    const extras = formatItemExtras(cheapest);
+
+    const parts = [
+      `**${item_name}** (${nameid}) ${webLink}`,
       `💰 Sale Price: **${formatPrice(minPrice)}**`,
       `📊 Average Price: **${formatPrice(medianPrice)}**`,
       `🏷️ Discount: **-${discount}%**`,
       `🏪 ${cheapest.shop_title || cheapest.char_name || 'Unknown'} \`${navi}\``,
-    ].join('\n');
+    ];
+    if (extras.length > 0) parts.push(...extras);
+
+    return parts.join('\n');
   });
 
-  // Split into chunks if needed (4096 char limit)
+  // Split into chunks (4096 char limit)
   const chunks = [];
   let current = '';
   for (const line of lines) {
@@ -209,11 +239,14 @@ async function handleWhoSells(message, query) {
 
   const lines = sorted.map((l) => {
     const navi = l.map ? `/navi ${l.map} ${l.x} ${l.y}` : 'Unknown';
-    return `**${formatPrice(l.price)}** x${l.amount} — ${l.shop_title || l.char_name} \`${navi}\``;
+    const extras = formatItemExtras(l);
+    const mainLine = `**${formatPrice(l.price)}** x${l.amount} — ${l.shop_title || l.char_name} \`${navi}\``;
+    return extras.length > 0 ? `${mainLine}\n↳ ${extras.join(' | ')}` : mainLine;
   });
 
   const embed = new EmbedBuilder()
     .setTitle(`🛒 ${item_name} (${nameid})`)
+    .setURL(itemPageUrl(nameid))
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
     .setDescription(lines.join('\n'))
