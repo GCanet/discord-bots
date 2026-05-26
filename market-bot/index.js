@@ -17,8 +17,143 @@ const DEAL_THRESHOLD = 0.25; // 75% off
 
 const LEGEND = [
   '`@ws <name or id>` — who sells (cheapest listings + location)',
+  '`@ws <name or id> <option>` — filter by option (id, name, or alias)',
   '`@ph <name or id>` — historical pricing',
 ].join('\n');
+
+// Option mappings and aliases
+const OPTION_MAP = {
+  // ID to label
+  1: 'HP',
+  2: 'SP',
+  3: 'STR',
+  4: 'AGI',
+  5: 'VIT',
+  6: 'INT',
+  7: 'DEX',
+  8: 'LUK',
+  16: 'ASPD %',
+  17: 'ATK',
+  18: 'HIT',
+  19: 'MATK',
+  20: 'DEF',
+  21: 'MDEF',
+  23: 'Perfect Dodge',
+  24: 'Crit Chance',
+  164: '% Crit Damage',
+  168: 'Healing Effectiveness',
+  170: 'Cast Time Reduction',
+  171: 'After Cast Delay',
+  255: 'Freeze Resist',
+  256: 'Stone Curse Resist',
+  172: 'SP Consumption',
+  150: '% Resist Boss',
+  167: '% Resist Long Range',
+  193: '% Resist All Elements',
+  257: '% Resist All Sizes',
+  258: '% Resist All Races',
+  160: '% Resist Small',
+  161: '% Resist Medium',
+  162: '% Resist Large',
+  25: '% Resist Neutral Element',
+  26: '% Resist Water Element',
+  27: '% Resist Earth Element',
+  28: '% Resist Fire Element',
+  29: '% Resist Wind Element',
+  30: '% Resist Poison Element',
+  31: '% Resist Holy Element',
+  32: '% Resist Shadow Element',
+  33: '% Resist Ghost Element',
+  87: '% Resist Formless Race',
+  88: '% Resist Undead Race',
+  89: '% Resist Brute Race',
+  90: '% Resist Plant Race',
+  91: '% Resist Insect Race',
+  92: '% Resist Fish Race',
+  93: '% Resist Demon Race',
+  94: '% Resist Demi-Human Race',
+  95: '% Resist Angel Race',
+  96: '% Resist Dragon Race',
+  37: '% Physical Damage to Neutral',
+  39: '% Physical Damage to Water',
+  41: '% Physical Damage to Earth',
+  43: '% Physical Damage to Fire',
+  45: '% Physical Damage to Wind',
+  47: '% Physical Damage to Poison',
+  49: '% Physical Damage to Holy',
+  51: '% Physical Damage to Shadow',
+  53: '% Physical Damage to Ghost',
+  55: '% Physical Damage to Undead (element)',
+  57: '% Magical Damage to Neutral',
+  59: '% Magical Damage to Water',
+  61: '% Magical Damage to Earth',
+  63: '% Magical Damage to Fire',
+  65: '% Magical Damage to Wind',
+  67: '% Magical Damage to Poison',
+  69: '% Magical Damage to Holy',
+  71: '% Magical Damage to Shadow',
+  73: '% Magical Damage to Ghost',
+  75: '% Magical Damage to Undead (element)',
+  97: '% Physical Damage to Formless',
+  98: '% Physical Damage to Undead (race)',
+  99: '% Physical Damage to Brute',
+  100: '% Physical Damage to Plant',
+  101: '% Physical Damage to Insect',
+  102: '% Physical Damage to Fish',
+  103: '% Physical Damage to Demon',
+  104: '% Physical Damage to Demi-Human',
+  105: '% Physical Damage to Angel',
+  106: '% Physical Damage to Dragon',
+  107: '% Magical Damage to Formless',
+  108: '% Magical Damage to Undead (race)',
+  109: '% Magical Damage to Brute',
+  110: '% Magical Damage to Plant',
+  111: '% Magical Damage to Insect',
+  112: '% Magical Damage to Fish',
+  113: '% Magical Damage to Demon',
+  114: '% Magical Damage to Demi-Human',
+  115: '% Magical Damage to Angel',
+  116: '% Magical Damage to Dragon',
+  279: '% Incoming Healing',
+  280: 'Movement Speed',
+};
+
+const OPTION_ALIASES = {
+  'hp': 1,
+  'sp': 2,
+  'str': 3,
+  'agi': 4,
+  'vit': 5,
+  'int': 6,
+  'dex': 7,
+  'luk': 8,
+  'aspd': 16,
+  'atk': 17,
+  'hit': 18,
+  'matk': 19,
+  'def': 20,
+  'mdef': 21,
+  'pdodge': 23,
+  'crit': 24,
+  'critdmg': 164,
+  'heal': 168,
+  'cast': 170,
+  'delay': 171,
+  'freeze': 255,
+  'sc': 256,           // stone curse
+  'stone': 256,
+  'stun': 256,         // common alias
+  'spcons': 172,
+  'boss': 150,
+  'long': 167,
+  'allres': 193,
+  'allsize': 257,
+  'allrace': 258,
+  'small': 160,
+  'medium': 161,
+  'large': 162,
+  // Add more as needed
+};
 
 const nameCache = new Map();
 const nameToId = new Map();
@@ -48,48 +183,71 @@ function itemPageUrl(nameid) {
 }
 
 /**
- * Format a single listing block for use in both @ws and deals.
- * Returns an array of lines.
- *
- * Layout:
- *   [+refine] [item name](url)          <- for deals (title line passed in)
- *   🃏 Card1 | Card2 | ...              <- only if cards present
- *   🎲 Options:
- *   ↳ Option 1
- *   ↳ Option 2
- *   <blank>
- *   🏷️ Discount: -X%                   <- deals only
- *   💰 Sale Price / price x amount
- *   📊 Average Price                    <- deals only / in fields for @ws
- *   <blank>
- *   🏪 Shop /navi ...
+ * Parse command query into item query + optional option filter
  */
+function parseWsQuery(fullQuery) {
+  const parts = fullQuery.trim().split(/\s+/);
+  if (parts.length === 1) {
+    return { itemQuery: parts[0], optionId: null };
+  }
+  const itemQuery = parts.slice(0, -1).join(' ');
+  let lastPart = parts[parts.length - 1];
+
+  // Try option ID
+  const asNum = parseInt(lastPart);
+  if (!isNaN(asNum) && OPTION_MAP[asNum]) {
+    return { itemQuery, optionId: asNum };
+  }
+
+  // Try alias
+  const aliasId = OPTION_ALIASES[normalize(lastPart)];
+  if (aliasId) {
+    return { itemQuery, optionId: aliasId };
+  }
+
+  // Try option name match (partial)
+  const lowerOpt = normalize(lastPart);
+  for (const [id, label] of Object.entries(OPTION_MAP)) {
+    if (normalize(label).includes(lowerOpt)) {
+      return { itemQuery, optionId: parseInt(id) };
+    }
+  }
+
+  // Fallback: treat last part as part of item name
+  return { itemQuery: fullQuery, optionId: null };
+}
+
+/**
+ * Check if a listing has the desired option
+ */
+function hasOption(listing, targetOptionId) {
+  if (!Array.isArray(listing.options) || listing.options.length === 0) return false;
+  return listing.options.some(opt => opt.id === targetOptionId);
+}
+
 function buildListingBlock(listing, opts = {}) {
   const {
     nameid,
     item_name,
     medianPrice,
     discount,
-    isWs = false,       // true = @ws mode (no discount line, price shown differently)
+    isWs = false,
     amount,
   } = opts;
 
   const lines = [];
 
-  // ── Title line (refine + clickable name) ──
   const refinePrefix = listing.refine ? `+${listing.refine} ` : '';
   const displayName = item_name || listing.item_name || `Item #${nameid}`;
   const url = itemPageUrl(nameid || listing.nameid);
   const titleLine = `${refinePrefix}[${displayName}](${url})`;
   lines.push(titleLine);
 
-  // ── Cards (inline, only if present) ──
   if (Array.isArray(listing.cards) && listing.cards.length > 0) {
     const cardList = listing.cards.map((c) => c.name).join(' | ');
     lines.push(`🃏 ${cardList}`);
   }
 
-  // ── Options (each on own indented line) ──
   if (Array.isArray(listing.options) && listing.options.length > 0) {
     lines.push('🎲 Options:');
     for (const o of listing.options) {
@@ -97,10 +255,8 @@ function buildListingBlock(listing, opts = {}) {
     }
   }
 
-  // blank line before pricing
   lines.push('');
 
-  // ── Pricing ──
   if (!isWs && discount !== undefined) {
     lines.push(`🏷️ Discount: **-${discount}%**`);
   }
@@ -113,10 +269,8 @@ function buildListingBlock(listing, opts = {}) {
     lines.push(`📊 Average Price: **${formatPrice(medianPrice)}**`);
   }
 
-  // blank line before shop
   lines.push('');
 
-  // ── Shop / location ──
   const shop = listing.shop_title || listing.char_name || 'Unknown';
   const navi = listing.map ? `/navi ${listing.map} ${listing.x} ${listing.y}` : '';
   lines.push(`🏪 ${shop}${navi ? ` \`${navi}\`` : ''}`);
@@ -236,7 +390,6 @@ async function scanForDeals(channel) {
     return lines.join('\n');
   });
 
-  // Split into chunks (4096 char limit), separated by blank line
   const chunks = [];
   let current = '';
   for (const block of dealBlocks) {
@@ -267,9 +420,10 @@ async function scanForDeals(channel) {
 }
 
 // ─── @ws — Who Sells ───────────────────────────────────────────────────────
-async function handleWhoSells(message, query) {
-  const nameid = resolveItem(query);
-  if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
+async function handleWhoSells(message, fullQuery) {
+  const { itemQuery, optionId } = parseWsQuery(fullQuery);
+  const nameid = resolveItem(itemQuery);
+  if (!nameid) return message.reply(`❌ Item \`${itemQuery}\` not found. Try the item ID number.`);
 
   let listings;
   try { listings = await fetchItemListings(nameid); }
@@ -281,8 +435,16 @@ async function handleWhoSells(message, query) {
     return message.reply(`📦 No one is selling **${item_name}** right now.`);
   }
 
-  const sorted = listings.sort((a, b) => a.price - b.price).slice(0, 8);
-  const med = median(listings.map((l) => l.price));
+  let filtered = listings;
+  if (optionId) {
+    filtered = listings.filter(l => hasOption(l, optionId));
+    if (filtered.length === 0) {
+      return message.reply(`📦 No listings found for **${item_name}** with option **${OPTION_MAP[optionId] || optionId}**.`);
+    }
+  }
+
+  const sorted = filtered.sort((a, b) => a.price - b.price).slice(0, 8);
+  const med = median(filtered.map((l) => l.price));
 
   const listingBlocks = sorted.map((l) => {
     const lines = buildListingBlock(l, { nameid, item_name, isWs: true });
@@ -290,17 +452,17 @@ async function handleWhoSells(message, query) {
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`🛒 ${item_name} (${nameid})`)
+    .setTitle(`🛒 ${item_name} (${nameid})${optionId ? ` [${OPTION_MAP[optionId]}]` : ''}`)
     .setURL(itemPageUrl(nameid))
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
     .setDescription(listingBlocks.join('\n\n'))
     .addFields(
       { name: '📊 Average Price', value: formatPrice(med), inline: true },
-      { name: '📦 Total Listings', value: `${listings.length}`, inline: true },
+      { name: '📦 Total Listings', value: `${filtered.length}`, inline: true },
       { name: '📋 Commands', value: LEGEND, inline: false }
     )
-    .setFooter({ text: `Showing cheapest ${sorted.length} of ${listings.length}` });
+    .setFooter({ text: `Showing cheapest ${sorted.length} of ${filtered.length}` });
 
   return message.reply({ embeds: [embed] });
 }
