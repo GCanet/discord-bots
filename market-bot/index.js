@@ -14,10 +14,7 @@ const BASE_URL = 'https://revenantelegy.com/api/v1.0/market';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
 const DEAL_THRESHOLD = 0.4; // 60% off
 
-const LEGEND = [
-  '`@ws <name or id>` — who sells (cheapest listings + location)',
-  '`@wb <name or id>` — price history (use as buy reference)',
-].join('\n');
+const LEGEND = '`@ws <name or id>` — who sells (cheapest listings + location)';
 
 const nameCache = new Map();
 const nameToId = new Map();
@@ -40,10 +37,6 @@ function formatPrice(p) {
 
 function itemImageUrl(nameid) {
   return `https://static.divine-pride.net/images/items/item/${nameid}.png`;
-}
-
-function itemWebUrl(nameid) {
-  return `https://www.divine-pride.net/database/item/${nameid}`;
 }
 
 async function fetchPage(url) {
@@ -153,15 +146,21 @@ async function scanForDeals(channel) {
 
   console.log(`[Market] ${deals.length} deals found, posting...`);
 
-  // Post all deals as a single list embed
+  // Build list with restored field titles
   const lines = deals.map((deal) => {
     const { nameid, item_name, minPrice, medianPrice, cheapest } = deal;
     const discount = Math.round((1 - minPrice / medianPrice) * 100);
     const navi = cheapest.map ? `/navi ${cheapest.map} ${cheapest.x} ${cheapest.y}` : 'Unknown';
-    return `**${item_name}** (${nameid}) — [web](${itemWebUrl(nameid)})\n💰 ${formatPrice(minPrice)} · 📊 ${formatPrice(medianPrice)} · 🏷️ -${discount}%\n🏪 ${cheapest.shop_title || cheapest.char_name || 'Unknown'} \`${navi}\``;
+    return [
+      `**${item_name}** (${nameid})`,
+      `💰 Sale Price: **${formatPrice(minPrice)}**`,
+      `📊 Average Price: **${formatPrice(medianPrice)}**`,
+      `🏷️ Discount: **-${discount}%**`,
+      `🏪 ${cheapest.shop_title || cheapest.char_name || 'Unknown'} \`${navi}\``,
+    ].join('\n');
   });
 
-  // Discord embed description limit is 4096 chars — split if needed
+  // Split into chunks if needed (4096 char limit)
   const chunks = [];
   let current = '';
   for (const line of lines) {
@@ -190,7 +189,7 @@ async function scanForDeals(channel) {
   }
 }
 
-// ─── Commands ─────────────────────────────────────────────────────────────
+// ─── @ws — Who Sells ───────────────────────────────────────────────────────
 async function handleWhoSells(message, query) {
   const nameid = resolveItem(query);
   if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
@@ -210,59 +209,23 @@ async function handleWhoSells(message, query) {
 
   const lines = sorted.map((l) => {
     const navi = l.map ? `/navi ${l.map} ${l.x} ${l.y}` : 'Unknown';
-    return `**${formatPrice(l.price)}** x${l.amount} — ${l.shop_title || l.char_name} \`${navi}\``;
+    return [
+      `💰 Sale Price: **${formatPrice(l.price)}** x${l.amount}`,
+      `📊 Average Price: **${formatPrice(med)}**`,
+      `🏪 ${l.shop_title || l.char_name || 'Unknown'} \`${navi}\``,
+    ].join('\n');
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`🛒 ${item_name} (${nameid}) — [web](${itemWebUrl(nameid)})`)
+    .setTitle(`🛒 ${item_name} (${nameid})`)
     .setColor(0x2ecc71)
     .setThumbnail(itemImageUrl(nameid))
-    .setDescription(lines.join('\n'))
+    .setDescription(lines.join('\n\n'))
     .addFields(
-      { name: '📊 Median', value: formatPrice(med), inline: true },
-      { name: '📦 Listings', value: `${listings.length}`, inline: true },
+      { name: '📦 Total Listings', value: `${listings.length}`, inline: true },
       { name: '📋 Commands', value: LEGEND, inline: false }
     )
     .setFooter({ text: `Showing cheapest ${sorted.length} of ${listings.length}` });
-
-  return message.reply({ embeds: [embed] });
-}
-
-async function handleWhoBuys(message, query) {
-  const nameid = resolveItem(query);
-  if (!nameid) return message.reply(`❌ Item \`${query}\` not found. Try the item ID number.`);
-
-  let history;
-  try {
-    const res = await fetch(`${BASE_URL}/history/?nameid=${nameid}`);
-    history = await res.json();
-  } catch (e) { return message.reply('❌ Failed to fetch market history.'); }
-
-  const item_name = nameCache.get(nameid) || `Item #${nameid}`;
-  const results = history.results || history;
-
-  if (!Array.isArray(results) || results.length === 0) {
-    return message.reply(`📦 No sale history found for **${item_name}** (${nameid}).`);
-  }
-
-  const recent = results.slice(0, 6);
-  const med = median(recent.map((r) => r.price));
-
-  const lines = recent.map((r) => {
-    const date = r.listed_at ? new Date(r.listed_at).toLocaleDateString() : '?';
-    return `**${formatPrice(r.price)}** x${r.amount || 1} — ${date}`;
-  });
-
-  const embed = new EmbedBuilder()
-    .setTitle(`💰 ${item_name} (${nameid}) — [web](${itemWebUrl(nameid)})`)
-    .setColor(0xe67e22)
-    .setThumbnail(itemImageUrl(nameid))
-    .setDescription(lines.join('\n'))
-    .addFields(
-      { name: '📊 Recent Median', value: formatPrice(med), inline: true },
-      { name: '📋 Commands', value: LEGEND, inline: false }
-    )
-    .setFooter({ text: 'Recent sales — use as buy price reference' });
 
   return message.reply({ embeds: [embed] });
 }
@@ -285,8 +248,6 @@ client.on('messageCreate', async (message) => {
   const content = message.content.trim();
   const wsMatch = content.match(/^[@!]ws\s+(.+)/i);
   if (wsMatch) return handleWhoSells(message, wsMatch[1].trim());
-  const wbMatch = content.match(/^[@!]wb\s+(.+)/i);
-  if (wbMatch) return handleWhoBuys(message, wbMatch[1].trim());
 });
 
 client.login(process.env.DISCORD_TOKEN);
