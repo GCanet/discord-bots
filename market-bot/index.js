@@ -15,13 +15,15 @@ const DB_URL = 'https://revenantelegy.com/api/v1.0';
 const ITEM_PAGE_BASE = 'https://revenantelegy.com/market/item';
 const DB_ITEM_PAGE_BASE = 'https://revenantelegy.com/database/item';
 const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 60 * 1000;
-const DEAL_THRESHOLD = 0.25; // 75% off
+const DEAL_THRESHOLD = 0.10; // 90% off
 
 const LEGEND = [
   '`@ws <name or id>` — who sells (cheapest listings + location)',
   '`@ph <name or id>` — historical pricing',
   '`@ii <name or id>` — item info & search',
   '`@whodrops <name or id>` — which monsters drop this item',
+  '`@mi <name or id>` — monster info',
+  '`@optionslist` — list all random option IDs & names',
 ].join('\n');
 
 // ─── Option maps ──────────────────────────────────────────────────────────
@@ -664,6 +666,112 @@ client.on('messageCreate', async (message) => {
 
   const wdMatch = content.match(/^[@!]whodrops\s+(.+)/i);
   if (wdMatch) return handleWhoDrops(message, wdMatch[1].trim());
+
+  const miMatch = content.match(/^[@!]mi\s+(.+)/i);
+  if (miMatch) return handleMobInfo(message, miMatch[1].trim());
+
+  if (content.match(/^[@!]optionslist$/i)) return handleOptionsList(message);
 });
 
 client.login(process.env.DISCORD_TOKEN);
+
+// ─── @optionslist ──────────────────────────────────────────────────────────
+async function handleOptionsList(message) {
+  const entries = Object.entries(OPTION_MAP);
+
+  // Split into two columns for readability
+  const half = Math.ceil(entries.length / 2);
+  const col1 = entries.slice(0, half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
+  const col2 = entries.slice(half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎲 Random Option IDs')
+    .setColor(0x9b59b6)
+    .addFields(
+      { name: 'Options', value: col1, inline: true },
+      { name: '\u200B', value: col2, inline: true },
+      { name: '💡 Usage', value: '`@ws <item> <option_id> <min_value>` — e.g. `@ws knife 17 50` (ATK ≥ 50)\nAliases also work: `atk`, `hp`, `mdef`, `crit`, `sc`, `aspd`, etc.', inline: false }
+    );
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ─── @mi — Mob Info ────────────────────────────────────────────────────────
+async function handleMobInfo(message, query) {
+  if (!mobCacheLoaded) {
+    await message.reply('⏳ Monster database is still loading, please try again in a few seconds.');
+    return;
+  }
+
+  const asNum = parseInt(query);
+  const lowerQ = normalize(query);
+
+  // Find matching mobs
+  let matches = [];
+  if (!isNaN(asNum)) {
+    matches = mobCache.filter(m => m.Id === asNum);
+  } else {
+    matches = mobCache.filter(m => normalize(m.Name).includes(lowerQ));
+  }
+
+  if (matches.length === 0)
+    return message.reply(`❌ No monster found for \`${query}\`.`);
+
+  // Multiple matches — show list
+  if (matches.length > 1) {
+    const lines = matches.slice(0, 25).map(m => `• **${m.Name}** — ID: \`${m.Id}\` | Lv.${m.Level} | ${m.Race} | ${m.Element} ${m.ElementLevel}`);
+    return message.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle(`🔍 Monsters matching "${query}" (${matches.length})`)
+        .setColor(0xe74c3c)
+        .setDescription(lines.join('\n'))
+        .addFields({ name: '📋 Commands', value: LEGEND })
+        .setFooter({ text: matches.length > 25 ? `Showing 25 of ${matches.length} — use mob ID for exact match` : `${matches.length} results` })
+    ]});
+  }
+
+  const mob = matches[0];
+
+  // Format drops
+  const formatDropLine = (drop, isMvp = false) => {
+    const star = isMvp ? '⭐ ' : '';
+    const lock = drop.steal_protected ? ' 🔒' : '';
+    return `${star}**${drop.item_name}** (${drop.item_id})${lock} — ${formatDropRate(drop.rate)}`;
+  };
+
+  const allDrops = [
+    ...(mob.MvpDrops || []).map(d => formatDropLine(d, true)),
+    ...(mob.Drops || []).map(d => formatDropLine(d, false)),
+  ];
+
+  const dropText = allDrops.length > 0 ? allDrops.join('\n') : 'No drops';
+
+  const statsText = [
+    `STR: **${mob.Str ?? '?'}** | AGI: **${mob.Agi}** | VIT: **${mob.Vit}**`,
+    `INT: **${mob.Int}** | DEX: **${mob.Dex}** | LUK: **${mob.Luk}**`,
+    `ATK: **${mob.Attack}~${mob.Attack2}** | DEF: **${mob.Defense}**`,
+    `Range: **${mob.AttackRange}** | Size: **${mob.Size}**`,
+    `Hit (100%): **${mob['100hit']}** | Flee (95%): **${mob['95flee']}**`,
+  ].join('\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle(`👾 ${mob.Name} (ID: ${mob.Id})`)
+    .setColor(0xe74c3c)
+    .setThumbnail(`https://static.divine-pride.net/images/mobs/png/${mob.Id}.png`)
+    .addFields(
+      { name: '📊 Level', value: `${mob.Level}`, inline: true },
+      { name: '❤️ HP', value: `${mob.Hp.toLocaleString()}`, inline: true },
+      { name: '✨ MVP EXP', value: mob.MvpExp > 0 ? `${mob.MvpExp.toLocaleString()}` : '—', inline: true },
+      { name: '🧪 Base EXP', value: `${mob.BaseExp.toLocaleString()}`, inline: true },
+      { name: '💼 Job EXP', value: `${mob.JobExp.toLocaleString()}`, inline: true },
+      { name: '🌍 Element', value: `${mob.Element} ${mob.ElementLevel}`, inline: true },
+      { name: '🐾 Race', value: mob.Race, inline: true },
+      { name: '📐 Size', value: mob.Size, inline: true },
+      { name: '🤖 AI', value: `${mob.Ai}`, inline: true },
+      { name: '⚔️ Stats', value: statsText, inline: false },
+      { name: `🎁 Drops (${allDrops.length})`, value: dropText.slice(0, 1020), inline: false },
+      { name: '📋 Commands', value: LEGEND, inline: false }
+    );
+
+  return message.reply({ embeds: [embed] });
+}
