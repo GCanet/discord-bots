@@ -18,10 +18,10 @@ const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 6
 const DEAL_THRESHOLD = 0.10; // 90% off
 
 const LEGEND = [
-  '`@ws <name or id>` — who sells (cheapest listings + location)',
+  '`@ws <name or id>` — who sells (accepts options)',
   '`@ph <name or id>` — historical pricing',
-  '`@ii <name or id>` — item info & search',
-  '`@wd <name or id>` — which monsters drop this item',
+  '`@ii <name or id>` — item info',
+  '`@wd <name or id>` — who drops this item',
   '`@mi <name or id>` — monster info',
   '`@ol` — list all random option IDs & names',
 ].join('\n');
@@ -120,6 +120,10 @@ function itemPageUrl(nameid) {
 
 function dbItemPageUrl(nameid) {
   return `${DB_ITEM_PAGE_BASE}/${nameid}`;
+}
+
+function mobPageUrl(mobId) {
+  return `https://revenantelegy.com/database/monster/${mobId}`;
 }
 
 // ─── Option filter parser ──────────────────────────────────────────────────
@@ -592,7 +596,7 @@ async function handleWhoDrops(message, query) {
   const normalDrops = results.filter(r => !r.isMvp);
 
   const formatEntry = ({ mob, drop }) =>
-    `**${mob.Name}** (ID: ${mob.Id}) — **${formatDropRate(drop.rate)}**${drop.steal_protected ? ' 🔒' : ''}`;
+    `**[${mob.Name}](<${mobPageUrl(mob.Id)}>)** (ID: ${mob.Id}) — **${formatDropRate(drop.rate)}**${drop.steal_protected ? ' 🔒' : ''}`;
 
   const lines = [];
   if (mvpDrops.length > 0) {
@@ -623,18 +627,23 @@ async function handleWhoDrops(message, query) {
 // ─── @optionslist / @ol ────────────────────────────────────────────────────
 async function handleOptionsList(message) {
   const entries = Object.entries(OPTION_MAP);
-  const half = Math.ceil(entries.length / 2);
-  const col1 = entries.slice(0, half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
-  const col2 = entries.slice(half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
+  const third = Math.ceil(entries.length / 3);
+  
+  const col1 = entries.slice(0, third).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
+  const col2 = entries.slice(third, third * 2).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
+  const col3 = entries.slice(third * 2).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
 
   const embed = new EmbedBuilder()
     .setTitle('🎲 Random Option IDs')
     .setColor(0x9b59b6)
+    .setDescription('```ansi\n' + 
+      col1.padEnd(40) + '   ' + 
+      col2.padEnd(40) + '   ' + 
+      col3 + '\n```')
     .addFields(
-      { name: 'Options', value: col1, inline: true },
-      { name: '\u200B', value: col2, inline: true },
-      { name: '💡 Usage', value: '`@ws <item> <option_id> <min_value>` — e.g. `@ws knife 17 50` (ATK ≥ 50)\nAliases also work: `atk`, `hp`, `mdef`, `crit`, `sc`, `aspd`, etc.', inline: false }
-    );
+      { name: '💡 Usage', value: '`@ws <item> <option_id> <min_value>` — e.g. `@ws knife 17 50` (ATK ≥ 50)\nAliases: `atk`, `hp`, `mdef`, `crit`, `sc`, `aspd`, etc.', inline: false }
+    )
+    .addFields({ name: '📋 Commands', value: LEGEND });
 
   return message.reply({ embeds: [embed] });
 }
@@ -660,7 +669,9 @@ async function handleMobInfo(message, query) {
     return message.reply(`❌ No monster found for \`${query}\`.`);
 
   if (matches.length > 1) {
-    const lines = matches.slice(0, 25).map(m => `• **${m.Name}** — ID: \`${m.Id}\` | Lv.${m.Level} | ${m.Race} | ${m.Element} ${m.ElementLevel}`);
+    const lines = matches.slice(0, 25).map(m => 
+      `• **[${m.Name}](<${mobPageUrl(m.Id)}>)** — ID: \`${m.Id}\` | Lv.${m.Level} | ${m.Race} | ${m.Element} ${m.ElementLevel}`
+    );
     return message.reply({ embeds: [
       new EmbedBuilder()
         .setTitle(`🔍 Monsters matching "${query}" (${matches.length})`)
@@ -676,7 +687,7 @@ async function handleMobInfo(message, query) {
   const formatDropLine = (drop, isMvp = false) => {
     const star = isMvp ? '⭐ ' : '';
     const lock = drop.steal_protected ? ' 🔒' : '';
-    return `${star}**${drop.item_name}** (${drop.item_id})${lock} — ${formatDropRate(drop.rate)}`;
+    return `${star}**[${drop.item_name}](<${dbItemPageUrl(drop.item_id)}>)** (${drop.item_id})${lock} — ${formatDropRate(drop.rate)}`;
   };
 
   const allDrops = [
@@ -696,6 +707,7 @@ async function handleMobInfo(message, query) {
 
   const embed = new EmbedBuilder()
     .setTitle(`👾 ${mob.Name} (ID: ${mob.Id})`)
+    .setURL(mobPageUrl(mob.Id))
     .setColor(0xe74c3c)
     .setThumbnail(`https://static.divine-pride.net/images/mobs/png/${mob.Id}.png`)
     .addFields(
@@ -730,14 +742,12 @@ client.on('messageCreate', async (message) => {
   const iiMatch = content.match(/^[@!]ii\s+(.+)/i);
   if (iiMatch) return handleItemInfo(message, iiMatch[1].trim());
 
-  // Support both @whodrops and @wd
   const wdMatch = content.match(/^[@!](whodrops|wd)\s+(.+)/i);
   if (wdMatch) return handleWhoDrops(message, wdMatch[2].trim());
 
   const miMatch = content.match(/^[@!]mi\s+(.+)/i);
   if (miMatch) return handleMobInfo(message, miMatch[1].trim());
 
-  // Support both @optionslist and @ol
   if (content.match(/^[@!](optionslist|ol)$/i)) return handleOptionsList(message);
 });
 
