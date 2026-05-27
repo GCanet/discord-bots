@@ -199,14 +199,10 @@ function buildPartyEmbed(instanceKey, slots, hour, creatorId) {
   });
 
   const commands = [
-    '`$job` — sign up by role (e.g. `$hw`, `$sniper1`, `$hp1`)',
-    '`$number` — sign up by slot number (e.g. `$3`)',
-    '`$swap $job` or `$swap $number` — change your role',
-    '`$out` — remove yourself',
     '`$clear <number>` — (creator) clear a slot',
-    tpl.hasFillSpots ? '`$fill` — sign up for a fill spot' : '',
-    '`$hournew <unix_timestamp>` — set instance time | `$hour help` for info',
-    '↕️ Or use the **dropdown below** to pick your role',
+    '`$hournew <unix_timestamp>` — set instance time',
+    '`$hour help` for info',
+    '↕️ Use the **dropdown below** to pick your role',
   ].filter(Boolean).join('\n');
 
   const embed = new EmbedBuilder()
