@@ -21,9 +21,9 @@ const LEGEND = [
   '`@ws <name or id>` — who sells (cheapest listings + location)',
   '`@ph <name or id>` — historical pricing',
   '`@ii <name or id>` — item info & search',
-  '`@whodrops <name or id>` — which monsters drop this item',
+  '`@whodrops <name or id>` or `@wd <name or id>` — which monsters drop this item',
   '`@mi <name or id>` — monster info',
-  '`@optionslist` — list all random option IDs & names',
+  '`@optionslist` or `@ol` — list all random option IDs & names',
 ].join('\n');
 
 // ─── Option maps ──────────────────────────────────────────────────────────
@@ -84,9 +84,8 @@ let mobCache = [];
 let mobCacheLoaded = false;
 let mobCacheLoading = false;
 
-// Item index built from mob drops — Map<item_id, { name, slots, fromMobs }>
-// We don't have a real item DB endpoint so we build from mob drops
-let itemIndex = new Map();   // item_id (number) -> { id, name }
+// Item index built from mob drops
+let itemIndex = new Map();   // item_id (number) -> { id, name, slots }
 let itemNameIndex = new Map(); // normalized name -> [item_id, ...]
 
 let alertedDealsThisCycle = new Set();
@@ -217,7 +216,6 @@ async function fetchItemListings(nameid) {
     const results = data.results || data;
     if (!Array.isArray(results) || results.length === 0) break;
     listings.push(...results);
-    // Use pages count for pagination (no 'next' field in this API)
     if (!data.pages || page >= data.pages) break;
     page++;
     if (page > 20) break;
@@ -254,21 +252,18 @@ async function buildNameCache() {
   console.log(`[Market] Name cache: ${nameCache.size} items`);
 }
 
-// Load ALL mob pages — uses pages count, not next field
 async function loadMobCache() {
   if (mobCacheLoaded || mobCacheLoading) return;
   mobCacheLoading = true;
   console.log('[Market] Loading full mob DB...');
 
   try {
-    // Get page count first
     const first = await fetchPage(`${DB_URL}/mobs/?page=1&page_size=50`);
     const totalPages = first.pages || 1;
     console.log(`[Market] Mob DB: ${first.total} mobs across ${totalPages} pages`);
 
     mobCache.push(...(first.results || []));
 
-    // Fetch remaining pages in parallel batches of 5
     for (let p = 2; p <= totalPages; p += 5) {
       const batch = [];
       for (let b = p; b < p + 5 && b <= totalPages; b++) {
@@ -278,7 +273,6 @@ async function loadMobCache() {
       for (const r of results) mobCache.push(...(r.results || []));
     }
 
-    // Build item index from all drop tables
     for (const mob of mobCache) {
       const allDrops = [
         ...(mob.Drops || []),
@@ -306,25 +300,21 @@ async function loadMobCache() {
 function resolveItem(query) {
   const asNum = parseInt(query);
   if (!isNaN(asNum)) return asNum;
-  // market name cache
   const exactId = nameToId.get(normalize(query));
   if (exactId) return exactId;
-  // item index from mob drops
   const fromIndex = itemNameIndex.get(normalize(query));
   if (fromIndex && fromIndex.length > 0) return fromIndex[0];
-  // partial match in market cache
+
   const lowerQ = normalize(query);
   for (const [name, id] of nameToId.entries()) {
     if (name.includes(lowerQ)) return id;
   }
-  // partial match in item index
   for (const [name, ids] of itemNameIndex.entries()) {
     if (name.includes(lowerQ)) return ids[0];
   }
   return null;
 }
 
-// Search items by name — returns array of { id, name, slots }
 function searchItems(query) {
   const asNum = parseInt(query);
   if (!isNaN(asNum)) {
@@ -336,7 +326,6 @@ function searchItems(query) {
   const seen = new Set();
   const results = [];
 
-  // Exact matches first
   for (const [name, ids] of itemNameIndex.entries()) {
     if (name === lowerQ) {
       for (const id of ids) {
@@ -344,7 +333,6 @@ function searchItems(query) {
       }
     }
   }
-  // Then partial matches
   for (const [name, ids] of itemNameIndex.entries()) {
     if (name !== lowerQ && name.includes(lowerQ)) {
       for (const id of ids) {
@@ -356,7 +344,6 @@ function searchItems(query) {
   return results.filter(Boolean);
 }
 
-// Find all mobs dropping an item — returns array of { mob, drop, isMvp }
 function findMobDrops(query) {
   const asNum = parseInt(query);
   const lowerQ = normalize(query);
@@ -537,7 +524,6 @@ async function handleItemInfo(message, query) {
   const matches = searchItems(query);
 
   if (matches.length === 0) {
-    // Try market name cache as fallback
     const nameid = resolveItem(query);
     if (!nameid) return message.reply(`❌ Item \`${query}\` not found.`);
     const name = nameCache.get(nameid) || `Item #${nameid}`;
@@ -554,7 +540,6 @@ async function handleItemInfo(message, query) {
     ]});
   }
 
-  // Multiple matches — show full list
   if (matches.length > 1) {
     const lines = matches.slice(0, 25).map(item => {
       const slots = item.slots > 0 ? ` [${item.slots}]` : '';
@@ -571,7 +556,6 @@ async function handleItemInfo(message, query) {
     ]});
   }
 
-  // Single match
   const item = matches[0];
   const slots = item.slots > 0 ? ` [${item.slots}]` : '';
 
@@ -589,7 +573,7 @@ async function handleItemInfo(message, query) {
   ]});
 }
 
-// ─── @whodrops ─────────────────────────────────────────────────────────────
+// ─── @whodrops / @wd ───────────────────────────────────────────────────────
 async function handleWhoDrops(message, query) {
   if (!mobCacheLoaded) {
     await message.reply('⏳ Monster database is still loading, please try again in a few seconds.');
@@ -621,7 +605,6 @@ async function handleWhoDrops(message, query) {
     lines.push(...normalDrops.map(formatEntry));
   }
 
-  // chunk if too long
   const description = lines.join('\n');
   const truncated = description.length > 3900;
 
@@ -637,49 +620,9 @@ async function handleWhoDrops(message, query) {
   return message.reply({ embeds: [embed] });
 }
 
-// ─── Bot Ready ────────────────────────────────────────────────────────────
-client.once('ready', async () => {
-  console.log(`[Market Bot] Logged in as ${client.user.tag}`);
-  await buildNameCache().catch(console.error);
-  loadMobCache().catch(console.error); // background, non-blocking
-  const channel = await client.channels.fetch(MARKET_CHANNEL_ID).catch(() => null);
-  if (!channel) { console.error('[Market Bot] Channel not found!'); return; }
-  await scanForDeals(channel).catch(console.error);
-  setInterval(() => scanForDeals(channel).catch(console.error), SCAN_INTERVAL_MS);
-  console.log(`[Market Bot] Scanning every ${SCAN_INTERVAL_MS / 60000} min.`);
-});
-
-// ─── Message Handler ──────────────────────────────────────────────────────
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.channelId !== MARKET_CHANNEL_ID) return;
-  const content = message.content.trim();
-
-  const wsMatch = content.match(/^[@!]ws\s+(.+)/i);
-  if (wsMatch) return handleWhoSells(message, wsMatch[1].trim());
-
-  const phMatch = content.match(/^[@!]ph\s+(.+)/i);
-  if (phMatch) return handlePriceHistory(message, phMatch[1].trim());
-
-  const iiMatch = content.match(/^[@!]ii\s+(.+)/i);
-  if (iiMatch) return handleItemInfo(message, iiMatch[1].trim());
-
-  const wdMatch = content.match(/^[@!]whodrops\s+(.+)/i);
-  if (wdMatch) return handleWhoDrops(message, wdMatch[1].trim());
-
-  const miMatch = content.match(/^[@!]mi\s+(.+)/i);
-  if (miMatch) return handleMobInfo(message, miMatch[1].trim());
-
-  if (content.match(/^[@!]optionslist$/i)) return handleOptionsList(message);
-});
-
-client.login(process.env.DISCORD_TOKEN);
-
-// ─── @optionslist ──────────────────────────────────────────────────────────
+// ─── @optionslist / @ol ────────────────────────────────────────────────────
 async function handleOptionsList(message) {
   const entries = Object.entries(OPTION_MAP);
-
-  // Split into two columns for readability
   const half = Math.ceil(entries.length / 2);
   const col1 = entries.slice(0, half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
   const col2 = entries.slice(half).map(([id, name]) => `\`${String(id).padStart(3)}\` ${name}`).join('\n');
@@ -706,7 +649,6 @@ async function handleMobInfo(message, query) {
   const asNum = parseInt(query);
   const lowerQ = normalize(query);
 
-  // Find matching mobs
   let matches = [];
   if (!isNaN(asNum)) {
     matches = mobCache.filter(m => m.Id === asNum);
@@ -717,7 +659,6 @@ async function handleMobInfo(message, query) {
   if (matches.length === 0)
     return message.reply(`❌ No monster found for \`${query}\`.`);
 
-  // Multiple matches — show list
   if (matches.length > 1) {
     const lines = matches.slice(0, 25).map(m => `• **${m.Name}** — ID: \`${m.Id}\` | Lv.${m.Level} | ${m.Race} | ${m.Element} ${m.ElementLevel}`);
     return message.reply({ embeds: [
@@ -732,7 +673,6 @@ async function handleMobInfo(message, query) {
 
   const mob = matches[0];
 
-  // Format drops
   const formatDropLine = (drop, isMvp = false) => {
     const star = isMvp ? '⭐ ' : '';
     const lock = drop.steal_protected ? ' 🔒' : '';
@@ -747,11 +687,11 @@ async function handleMobInfo(message, query) {
   const dropText = allDrops.length > 0 ? allDrops.join('\n') : 'No drops';
 
   const statsText = [
-    `STR: **${mob.Str ?? '?'}** | AGI: **${mob.Agi}** | VIT: **${mob.Vit}**`,
-    `INT: **${mob.Int}** | DEX: **${mob.Dex}** | LUK: **${mob.Luk}**`,
-    `ATK: **${mob.Attack}~${mob.Attack2}** | DEF: **${mob.Defense}**`,
-    `Range: **${mob.AttackRange}** | Size: **${mob.Size}**`,
-    `Hit (100%): **${mob['100hit']}** | Flee (95%): **${mob['95flee']}**`,
+    `STR: **${mob.Str ?? '?'}** | AGI: **${mob.Agi ?? '?'}** | VIT: **${mob.Vit ?? '?'}**`,
+    `INT: **${mob.Int ?? '?'}** | DEX: **${mob.Dex ?? '?'}** | LUK: **${mob.Luk ?? '?'}**`,
+    `ATK: **${mob.Attack ?? '?'}~${mob.Attack2 ?? '?'}** | DEF: **${mob.Defense ?? '?'}**`,
+    `Range: **${mob.AttackRange ?? '?'}** | Size: **${mob.Size ?? '?'}**`,
+    `Hit (100%): **${mob['100hit'] ?? '?'}** | Flee (95%): **${mob['95flee'] ?? '?'}**`,
   ].join('\n');
 
   const embed = new EmbedBuilder()
@@ -759,15 +699,14 @@ async function handleMobInfo(message, query) {
     .setColor(0xe74c3c)
     .setThumbnail(`https://static.divine-pride.net/images/mobs/png/${mob.Id}.png`)
     .addFields(
-      { name: '📊 Level', value: `${mob.Level}`, inline: true },
-      { name: '❤️ HP', value: `${mob.Hp.toLocaleString()}`, inline: true },
-      { name: '✨ MVP EXP', value: mob.MvpExp > 0 ? `${mob.MvpExp.toLocaleString()}` : '—', inline: true },
-      { name: '🧪 Base EXP', value: `${mob.BaseExp.toLocaleString()}`, inline: true },
-      { name: '💼 Job EXP', value: `${mob.JobExp.toLocaleString()}`, inline: true },
-      { name: '🌍 Element', value: `${mob.Element} ${mob.ElementLevel}`, inline: true },
-      { name: '🐾 Race', value: mob.Race, inline: true },
-      { name: '📐 Size', value: mob.Size, inline: true },
-      { name: '🤖 AI', value: `${mob.Ai}`, inline: true },
+      { name: '📊 Level', value: `${mob.Level ?? '?'}`, inline: true },
+      { name: '❤️ HP', value: `${(mob.Hp ?? 0).toLocaleString()}`, inline: true },
+      ...(mob.MvpExp > 0 ? [{ name: '✨ MVP EXP', value: `${mob.MvpExp.toLocaleString()}`, inline: true }] : []),
+      { name: '🧪 Base EXP', value: `${(mob.BaseExp ?? 0).toLocaleString()}`, inline: true },
+      { name: '💼 Job EXP', value: `${(mob.JobExp ?? 0).toLocaleString()}`, inline: true },
+      { name: '🌍 Element', value: `${mob.Element ?? '?'} ${mob.ElementLevel ?? ''}`, inline: true },
+      { name: '🐾 Race', value: mob.Race ?? '?', inline: true },
+      { name: '📐 Size', value: mob.Size ?? '?', inline: true },
       { name: '⚔️ Stats', value: statsText, inline: false },
       { name: `🎁 Drops (${allDrops.length})`, value: dropText.slice(0, 1020), inline: false },
       { name: '📋 Commands', value: LEGEND, inline: false }
@@ -775,3 +714,42 @@ async function handleMobInfo(message, query) {
 
   return message.reply({ embeds: [embed] });
 }
+
+// ─── Message Handler ──────────────────────────────────────────────────────
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== MARKET_CHANNEL_ID) return;
+  const content = message.content.trim();
+
+  const wsMatch = content.match(/^[@!]ws\s+(.+)/i);
+  if (wsMatch) return handleWhoSells(message, wsMatch[1].trim());
+
+  const phMatch = content.match(/^[@!]ph\s+(.+)/i);
+  if (phMatch) return handlePriceHistory(message, phMatch[1].trim());
+
+  const iiMatch = content.match(/^[@!]ii\s+(.+)/i);
+  if (iiMatch) return handleItemInfo(message, iiMatch[1].trim());
+
+  // Support both @whodrops and @wd
+  const wdMatch = content.match(/^[@!](whodrops|wd)\s+(.+)/i);
+  if (wdMatch) return handleWhoDrops(message, wdMatch[2].trim());
+
+  const miMatch = content.match(/^[@!]mi\s+(.+)/i);
+  if (miMatch) return handleMobInfo(message, miMatch[1].trim());
+
+  // Support both @optionslist and @ol
+  if (content.match(/^[@!](optionslist|ol)$/i)) return handleOptionsList(message);
+});
+
+client.once('ready', async () => {
+  console.log(`[Market Bot] Logged in as ${client.user.tag}`);
+  await buildNameCache().catch(console.error);
+  loadMobCache().catch(console.error);
+  const channel = await client.channels.fetch(MARKET_CHANNEL_ID).catch(() => null);
+  if (!channel) { console.error('[Market Bot] Channel not found!'); return; }
+  await scanForDeals(channel).catch(console.error);
+  setInterval(() => scanForDeals(channel).catch(console.error), SCAN_INTERVAL_MS);
+  console.log(`[Market Bot] Scanning every ${SCAN_INTERVAL_MS / 60000} min.`);
+});
+
+client.login(process.env.DISCORD_TOKEN);
