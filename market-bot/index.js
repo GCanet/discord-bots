@@ -21,9 +21,9 @@ const LEGEND = [
   '`@ws <name or id>` — who sells (cheapest listings + location)',
   '`@ph <name or id>` — historical pricing',
   '`@ii <name or id>` — item info & search',
-  '`@whodrops <name or id>` or `@wd <name or id>` — which monsters drop this item',
+  '`@wd <name or id>` — which monsters drop this item',
   '`@mi <name or id>` — monster info',
-  '`@optionslist` or `@ol` — list all random option IDs & names',
+  '`@ol` — list all random option IDs & names',
 ].join('\n');
 
 // ─── Option maps ──────────────────────────────────────────────────────────
