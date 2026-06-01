@@ -512,7 +512,51 @@ client.on('messageCreate', async (message) => {
     const instanceKey = resolveInstanceKey(args);
 
     if (!instanceKey) {
-      return message.reply(`❌ Unknown instance \`${args}\`.`);
+      // Free-text: create 14 fill spot party with the given name
+      const forumChannelId = process.env.INSTANCES_FORUM_CHANNEL_ID;
+      let forumChannel;
+      try { forumChannel = await client.channels.fetch(forumChannelId); }
+      catch (e) { return message.reply('❌ Could not find the forum channel.'); }
+      if (forumChannel.type !== ChannelType.GuildForum)
+        return message.reply('❌ INSTANCES_FORUM_CHANNEL_ID is not a forum channel.');
+
+      const slots = Array.from({ length: 14 }, () => ({ role: 'FILL SPOT', player: null, userId: null }));
+      const defaultHour = getDefaultFridayHour();
+
+      // Register under a synthetic key so the rest of the bot works
+      const freeKey = '__freetext__';
+      if (!INSTANCE_TEMPLATES[freeKey]) {
+        INSTANCE_TEMPLATES[freeKey] = { fullName: args, slots: [], hasFillSpots: true };
+      }
+      INSTANCE_TEMPLATES[freeKey].fullName = args;
+
+      const embed = buildPartyEmbed(freeKey, slots, defaultHour, message.author.id);
+      const dropdown = buildDropdown(freeKey, slots);
+      const signout = buildSignOutButton();
+
+      let thread;
+      try {
+        thread = await forumChannel.threads.create({
+          name: args,
+          message: { embeds: [embed], components: [dropdown, signout] },
+        });
+      } catch (e) {
+        console.error(e);
+        return message.reply('❌ Failed to create thread.');
+      }
+
+      const firstMessage = await thread.fetchStarterMessage();
+      const instanceState = {
+        instanceKey: freeKey,
+        slots,
+        creatorId: message.author.id,
+        hour: defaultHour,
+        mainMessageId: firstMessage.id,
+      };
+
+      activeInstances.set(thread.id, instanceState);
+      scheduleReminders(thread, instanceState);
+      return message.reply(`✅ Party thread created: ${thread.url}`);
     }
 
     const tpl = INSTANCE_TEMPLATES[instanceKey];
