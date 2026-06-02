@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const bossData = require('./bosses.json');
 
 const client = new Client({
@@ -11,12 +11,19 @@ const client = new Client({
 });
 
 const MVP_CHANNEL_ID = process.env.MVP_CHANNEL_ID;
+const SERVER_HEALTH_URL = process.env.SERVER_HEALTH_URL || 'https://revenantelegy.com/api/v1.0/serverhealth/';
+
+// Launch event timestamp: 12 June 2026 19:00 UTC
+const LAUNCH_TIMESTAMP = Math.floor(new Date('2026-06-12T19:00:00Z').getTime() / 1000);
 
 const LEGEND = [
   '`<boss name>` — register kill & start timer',
   '`!current` — list all active timers',
   '`!remove <name>` — delete a timer',
   '`!edit <name>` — reset kill time to now',
+  '`!launch` — show launch event countdown',
+  '`!server` — show server status & player count',
+  '`!players` — show current player & merchant count',
 ].join('\n');
 
 // ─── Build lookup index ────────────────────────────────────────────────────
@@ -37,6 +44,17 @@ for (const boss of bossData.bosses) {
 // ─── Active timers ─────────────────────────────────────────────────────────
 const activeTimers = new Map();
 const pendingDisambig = new Map();
+
+// ─── Server health fetch ───────────────────────────────────────────────────
+async function fetchServerHealth() {
+  const res = await fetch(SERVER_HEALTH_URL);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function statusIcon(online) {
+  return online ? '🟢 Online' : '🔴 Offline';
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -95,9 +113,15 @@ function scheduleSpawnReminder(boss, minSpawn, killerId, channel) {
   return setTimeout(async () => {
     try {
       const minTs = Math.floor(minSpawn / 1000);
-      await channel.send(
-        `<@${killerId}> ⏰ **${boss.bossName}** is spawning in ~10 minutes!\nMap: \`${boss.location || 'Unknown'}\` — <t:${minTs}:T>`
-      );
+      const button = new ButtonBuilder()
+        .setCustomId(`killed_again_${boss.bossName}_${boss.location}`)
+        .setLabel('KILLED AGAIN')
+        .setStyle(ButtonStyle.Danger);
+      const row = new ActionRowBuilder().addComponents(button);
+      await channel.send({
+        content: `<@${killerId}> ⏰ **${boss.bossName}** is spawning in ~10 minutes!\nMap: \`${boss.location || 'Unknown'}\` — <t:${minTs}:T>`,
+        components: [row],
+      });
     } catch (e) {
       console.error('Failed to send reminder:', e.message);
     }
@@ -134,6 +158,49 @@ function findTimerByName(query) {
 // ─── Bot Ready ────────────────────────────────────────────────────────────
 client.once('ready', () => {
   console.log(`[MVP Bot] Logged in as ${client.user.tag}`);
+});
+
+// ─── Button interactions ───────────────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (!interaction.customId.startsWith('killed_again_')) return;
+
+  // customId format: killed_again_<bossName>_<location>
+  const payload = interaction.customId.slice('killed_again_'.length);
+  // Find matching active timer by key
+  let foundKey = null;
+  for (const [key] of activeTimers.entries()) {
+    if (payload === key) { foundKey = key; break; }
+  }
+  // Fallback: match by bossName prefix
+  if (!foundKey) {
+    for (const [key, timer] of activeTimers.entries()) {
+      if (payload.startsWith(timer.boss.bossName)) { foundKey = key; break; }
+    }
+  }
+
+  if (!foundKey) {
+    return interaction.reply({ content: '❌ Could not find an active timer for this boss.', ephemeral: true });
+  }
+
+  const existing = activeTimers.get(foundKey);
+  const { boss, killerId } = existing;
+  if (existing.timerId) clearTimeout(existing.timerId);
+
+  const killTime = Date.now();
+  const { minSpawn, maxSpawn } = registerBossKill(boss, killTime, killerId, interaction.channel);
+  const embed = buildTimerEmbed(boss, killTime, minSpawn, maxSpawn);
+
+  // Disable the button on the original message
+  const disabledButton = new ButtonBuilder()
+    .setCustomId(interaction.customId)
+    .setLabel('KILLED AGAIN')
+    .setStyle(ButtonStyle.Danger)
+    .setDisabled(true);
+  const disabledRow = new ActionRowBuilder().addComponents(disabledButton);
+  await interaction.update({ components: [disabledRow] });
+
+  await interaction.followUp({ content: `🔁 **${boss.bossName}** killed again by <@${interaction.user.id}>! Timer reset.`, embeds: [embed] });
 });
 
 // ─── Message Handler ──────────────────────────────────────────────────────
@@ -173,6 +240,42 @@ client.on('messageCreate', async (message) => {
     const { minSpawn, maxSpawn } = registerBossKill(boss, killTime, killerId, message.channel);
     const embed = buildTimerEmbed(boss, killTime, minSpawn, maxSpawn);
     return message.reply({ content: `✅ Timer for **${boss.bossName}** reset to now.`, embeds: [embed] });
+  }
+
+  // !launch
+  if (content.toLowerCase() === '!launch') {
+    const now = Math.floor(Date.now() / 1000);
+    return message.reply(
+      `🚀 **Revenant Elegy Launch**\n📅 <t:${LAUNCH_TIMESTAMP}:F>\n⏳ <t:${LAUNCH_TIMESTAMP}:R>`
+    );
+  }
+
+  // !server
+  if (content.toLowerCase() === '!server') {
+    try {
+      const health = await fetchServerHealth();
+      return message.reply(
+        `**🖥️ Server Status**\n` +
+        `Login: ${statusIcon(health.login)} | Char: ${statusIcon(health.char)} | Map: ${statusIcon(health.map)}\n` +
+        `👥 Players online: **${health.count}** (${health.unique} unique, ${health.multiclients} multiclient)\n` +
+        `🛒 Autotraders/merchants: **${health.autotraders}**`
+      );
+    } catch (e) {
+      return message.reply('❌ Could not reach the server health API.');
+    }
+  }
+
+  // !players
+  if (content.toLowerCase() === '!players') {
+    try {
+      const health = await fetchServerHealth();
+      return message.reply(
+        `👥 **Players online:** ${health.count} (${health.unique} unique, ${health.multiclients} multiclient)\n` +
+        `🛒 **Autotraders/merchants:** ${health.autotraders}`
+      );
+    } catch (e) {
+      return message.reply('❌ Could not reach the server health API.');
+    }
   }
 
   // ── Handle disambiguation reply ────────────────────────────────────────
