@@ -18,12 +18,12 @@ const SCAN_INTERVAL_MS = (parseInt(process.env.SCAN_INTERVAL_MINUTES) || 15) * 6
 const DEAL_THRESHOLD = 0.10; // 90% off
 
 const LEGEND = [
-  '`@ws <name or id>` — who sells (accepts options)',
-  '`@ph <name or id>` — historical pricing',
-  '`@ii <name or id>` — item info',
-  '`@wd <name or id>` — who drops this item',
-  '`@mi <name or id>` — monster info',
-  '`@ol` — list all random option IDs & names',
+  '`$ws <name or id>` — who sells (accepts options)',
+  '`$ph <name or id>` — historical pricing',
+  '`$ii <name or id>` — item info',
+  '`$wd <name or id>` — who drops this item',
+  '`$mi <name or id>` — monster info',
+  '`$ol` — list all random option IDs & names',
 ].join('\n');
 
 // ─── Option maps ──────────────────────────────────────────────────────────
@@ -641,7 +641,7 @@ async function handleOptionsList(message) {
       col2.padEnd(40) + '   ' + 
       col3 + '\n```')
     .addFields(
-      { name: '💡 Usage', value: '`@ws <item> <option_id> <min_value>` — e.g. `@ws knife 17 50` (ATK ≥ 50)\nAliases: `atk`, `hp`, `mdef`, `crit`, `sc`, `aspd`, etc.', inline: false }
+      { name: '💡 Usage', value: '`$ws <item> <option_id> <min_value>` — e.g. `$ws knife 17 50` (ATK ≥ 50)\nAliases: `atk`, `hp`, `mdef`, `crit`, `sc`, `aspd`, etc.', inline: false }
     )
     .addFields({ name: '📋 Commands', value: LEGEND });
 
@@ -733,22 +733,22 @@ client.on('messageCreate', async (message) => {
   if (message.channelId !== MARKET_CHANNEL_ID) return;
   const content = message.content.trim();
 
-  const wsMatch = content.match(/^[@!]ws\s+(.+)/i);
+  const wsMatch = content.match(/^\$ws\s+(.+)/i);
   if (wsMatch) return handleWhoSells(message, wsMatch[1].trim());
 
-  const phMatch = content.match(/^[@!]ph\s+(.+)/i);
+  const phMatch = content.match(/^\$ph\s+(.+)/i);
   if (phMatch) return handlePriceHistory(message, phMatch[1].trim());
 
-  const iiMatch = content.match(/^[@!]ii\s+(.+)/i);
+  const iiMatch = content.match(/^\$ii\s+(.+)/i);
   if (iiMatch) return handleItemInfo(message, iiMatch[1].trim());
 
-  const wdMatch = content.match(/^[@!](whodrops|wd)\s+(.+)/i);
+  const wdMatch = content.match(/^\$(whodrops|wd)\s+(.+)/i);
   if (wdMatch) return handleWhoDrops(message, wdMatch[2].trim());
 
-  const miMatch = content.match(/^[@!]mi\s+(.+)/i);
+  const miMatch = content.match(/^\$mi\s+(.+)/i);
   if (miMatch) return handleMobInfo(message, miMatch[1].trim());
 
-  if (content.match(/^[@!](optionslist|ol)$/i)) return handleOptionsList(message);
+  if (content.match(/^\$(optionslist|ol)$/i)) return handleOptionsList(message);
 });
 
 client.once('ready', async () => {
