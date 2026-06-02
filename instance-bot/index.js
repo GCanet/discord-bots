@@ -17,6 +17,19 @@ const client = new Client({
 const PARTY_SIZE = 14;
 const reminderTimers = new Map();
 
+const SERVER_HEALTH_URL = process.env.SERVER_HEALTH_URL || 'https://revenantelegy.com/api/v1.0/serverhealth/';
+const LAUNCH_TIMESTAMP = Math.floor(new Date('2026-06-12T19:00:00Z').getTime() / 1000);
+
+async function fetchServerHealth() {
+  const res = await fetch(SERVER_HEALTH_URL);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function statusIcon(online) {
+  return online ? '🟢 Online' : '🔴 Offline';
+}
+
 // ─── Instance Templates ────────────────────────────────────────────────────
 const INSTANCE_TEMPLATES = {
   ifirth: {
@@ -500,6 +513,41 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   const content = message.content.trim();
+
+  // !launch
+  if (content.toLowerCase() === '!launch') {
+    return message.reply(
+      `🚀 **Revenant Elegy Launch**\n📅 <t:${LAUNCH_TIMESTAMP}:F>\n⏳ <t:${LAUNCH_TIMESTAMP}:R>`
+    );
+  }
+
+  // !server
+  if (content.toLowerCase() === '!server') {
+    try {
+      const health = await fetchServerHealth();
+      return message.reply(
+        `**🖥️ Server Status**\n` +
+        `Login: ${statusIcon(health.login)} | Char: ${statusIcon(health.char)} | Map: ${statusIcon(health.map)}\n` +
+        `👥 Players online: **${health.count}** (${health.unique} unique, ${health.multiclients} multiclient)\n` +
+        `🛒 Autotraders/merchants: **${health.autotraders}**`
+      );
+    } catch (e) {
+      return message.reply('❌ Could not reach the server health API.');
+    }
+  }
+
+  // !players
+  if (content.toLowerCase() === '!players') {
+    try {
+      const health = await fetchServerHealth();
+      return message.reply(
+        `👥 **Players online:** ${health.count} (${health.unique} unique, ${health.multiclients} multiclient)\n` +
+        `🛒 **Autotraders/merchants:** ${health.autotraders}`
+      );
+    } catch (e) {
+      return message.reply('❌ Could not reach the server health API.');
+    }
+  }
 
   // !instance
   if (content.toLowerCase().startsWith('!instance')) {
