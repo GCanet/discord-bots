@@ -21,9 +21,6 @@ const LEGEND = [
   '`!current` — list all active timers',
   '`!remove <name>` — delete a timer',
   '`!edit <name>` — reset kill time to now',
-  '`!launch` — show launch event countdown',
-  '`!server` — show server status & player count',
-  '`!players` — show current player & merchant count',
 ].join('\n');
 
 // ─── Build lookup index ────────────────────────────────────────────────────
